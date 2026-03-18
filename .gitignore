@@ -186,5 +186,15 @@ gradle-app.setting
 # # Work around https://youtrack.jetbrains.com/issue/IDEA-116898
 # gradle/wrapper/gradle-wrapper.properties
 
+### Eclipse template
+# Eclipse IDE settings
+.settings/
+.classpath
+.project
+bin/
+
+# Personal Gradle configuration (proxy settings, etc.)
+gradle.properties
+
 #GoMule specific
 GoMule/projects/*
