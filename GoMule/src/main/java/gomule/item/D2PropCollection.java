@@ -362,7 +362,10 @@ public class D2PropCollection extends ArrayList {
     public void readProp(D2BitReader pFile, int rootProp, int qFlag) {
 
         D2TxtFileItemProperties pRow = D2TxtFile.ITEM_STAT_COST.getRow(rootProp);
-        int readLength = Integer.parseInt(pRow.get("Save Bits"));
+        if (pRow == null) return;
+        String saveBitsStr = pRow.get("Save Bits");
+        if (saveBitsStr == null || saveBitsStr.isEmpty()) return;
+        int readLength = Integer.parseInt(saveBitsStr);
         int saveAdd = 0;
         if (!pRow.get("Save Add").equals("")) {
             saveAdd = Integer.parseInt(pRow.get("Save Add"));

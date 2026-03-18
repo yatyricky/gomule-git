@@ -184,10 +184,26 @@ public final class D2TxtFile {
             pVals[2] = 0;
 
             if (propsStatCode.equals("item_addclassskills")) {
-                pVals[0] = Integer.parseInt(D2TxtFile.PROPS.searchColumns("code", pCode).get("val1"));
+                D2TxtFileItemProperties classSkillRow = D2TxtFile.PROPS.searchColumns("code", pCode);
+                if (classSkillRow == null) return outArr;
+                String val1 = classSkillRow.get("val1");
+                if (val1 == null || val1.isEmpty()) return outArr;
+                try {
+                    pVals[0] = Integer.parseInt(val1);
+                } catch (NumberFormatException e) {
+                    return outArr;
+                }
             }
 
-            outArr.add(new D2Prop(Integer.parseInt(D2TxtFile.ITEM_STAT_COST.searchColumns("Stat", propsStatCode).get("*ID")), pVals, qFlag));
+            D2TxtFileItemProperties statCostRow = D2TxtFile.ITEM_STAT_COST.searchColumns("Stat", propsStatCode);
+            if (statCostRow == null) return outArr;
+            String statId = statCostRow.get("*ID");
+            if (statId == null || statId.isEmpty()) return outArr;
+            try {
+                outArr.add(new D2Prop(Integer.parseInt(statId), pVals, qFlag));
+            } catch (NumberFormatException e) {
+                return outArr;
+            }
 
         }
         return outArr;

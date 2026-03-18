@@ -157,28 +157,125 @@ public class D2Item implements Comparable, D2ItemInterface {
     private int materialStashStackSize = 0;
     private final int endOfItemInBytes;
     private String itemDifficulty;
+    private boolean readMaterialStash = true;
+    private ConversionContext conversionContext;
+
+    private static class ConversionContext {
+        final int topLevelStartBitPos;
+        final java.util.List<Integer> insertionPoints = new java.util.ArrayList<>();
+        final java.util.List<Integer> alignmentPoints = new java.util.ArrayList<>();
+        int meaningfulBitCount = -1;
+
+        ConversionContext(int topLevelStartBitPos) {
+            this.topLevelStartBitPos = topLevelStartBitPos;
+        }
+
+        void recordInsertion(int currentBitPos) {
+            insertionPoints.add(currentBitPos - topLevelStartBitPos);
+        }
+
+        void recordAlignment(int currentBitPos) {
+            alignmentPoints.add(currentBitPos - topLevelStartBitPos);
+        }
+    }
 
     public D2Item(String pFileName, D2BitReader pFile, long pCharLvl)
+            throws Exception {
+        this(pFileName, pFile, pCharLvl, true, null);
+    }
+
+    public D2Item(String pFileName, D2BitReader pFile, long pCharLvl, boolean readMaterialStash)
+            throws Exception {
+        this(pFileName, pFile, pCharLvl, readMaterialStash, null);
+    }
+
+    private D2Item(String pFileName, D2BitReader pFile, long pCharLvl, boolean readMaterialStash, ConversionContext parentContext)
             throws Exception {
         iFileName = pFileName;
         iIsChar = iFileName.endsWith(".d2s");
         iCharLvl = (int) pCharLvl;
+        this.readMaterialStash = readMaterialStash;
 
         try {
             int startOfItemInBytes = pFile.get_byte_pos();
+            boolean isTopLevel = (parentContext == null);
+            if (!readMaterialStash) {
+                this.conversionContext = isTopLevel ? new ConversionContext(startOfItemInBytes * 8) : parentContext;
+            }
             read_item(pFile);
+            if (!isTopLevel && conversionContext != null) {
+                conversionContext.recordAlignment(pFile.get_pos());
+            }
+            if (isTopLevel && conversionContext != null) {
+                conversionContext.meaningfulBitCount = pFile.get_pos() - startOfItemInBytes * 8;
+            }
             int endOfItemInBytes = pFile.getNextByteBoundaryInBits() / 8;
             this.endOfItemInBytes = endOfItemInBytes;
             int lLengthToNextJM = endOfItemInBytes - startOfItemInBytes;
             pFile.set_byte_pos(startOfItemInBytes);
             iItem = new D2BitReader(pFile.get_bytes(lLengthToNextJM));
             pFile.set_byte_pos(startOfItemInBytes + lLengthToNextJM);
+            if (isTopLevel && conversionContext != null && !conversionContext.insertionPoints.isEmpty()) {
+                iItem = convertItemBits(iItem, conversionContext);
+            }
+            conversionContext = null;
         } catch (D2ItemException pEx) {
             throw pEx;
         } catch (Exception pEx) {
             pEx.printStackTrace();
             throw new D2ItemException("Error: " + pEx.getMessage() + getExStr());
         }
+    }
+
+    private static D2BitReader convertItemBits(D2BitReader original, ConversionContext ctx) {
+        java.util.List<Integer> inserts = ctx.insertionPoints;
+        java.util.List<Integer> aligns = ctx.alignmentPoints;
+
+        // Build segments: each is (srcStart, srcMeaningfulEnd)
+        // Segments are separated by alignment points
+        java.util.List<int[]> segments = new java.util.ArrayList<>();
+        int segStart = 0;
+        for (int a : aligns) {
+            segments.add(new int[]{segStart, a});
+            segStart = ((a + 7) & ~7); // source byte boundary after alignment
+        }
+        if (aligns.isEmpty()) {
+            // No sockets: single segment covering all meaningful bits
+            segments.add(new int[]{0, ctx.meaningfulBitCount});
+        }
+
+        // Estimate max output size
+        int maxBits = ctx.meaningfulBitCount + inserts.size() + aligns.size() * 8;
+        D2BitReader result = new D2BitReader(new byte[(maxBits + 7) / 8]);
+        int insertIdx = 0;
+
+        for (int[] seg : segments) {
+            int srcStart = seg[0];
+            int srcEnd = seg[1];
+            original.set_pos(srcStart);
+            for (int srcBit = srcStart; srcBit < srcEnd; srcBit++) {
+                while (insertIdx < inserts.size() && inserts.get(insertIdx) == srcBit) {
+                    result.write(0, 1);
+                    insertIdx++;
+                }
+                result.write(original.read(1), 1);
+            }
+            // Handle insertions at exactly srcEnd
+            while (insertIdx < inserts.size() && inserts.get(insertIdx) == srcEnd) {
+                result.write(0, 1);
+                insertIdx++;
+            }
+            // Pad output to byte boundary
+            int pos = result.get_pos();
+            int pad = (8 - (pos & 7)) & 7;
+            for (int i = 0; i < pad; i++) result.write(0, 1);
+        }
+
+        // Trim to actual output size
+        int outBytes = result.get_pos() / 8;
+        byte[] trimmed = new byte[outBytes];
+        System.arraycopy(result.getFileContent(), 0, trimmed, 0, outBytes);
+        return new D2BitReader(trimmed);
     }
 
     // read basic information from the bytes
@@ -253,6 +350,9 @@ public class D2Item implements Comparable, D2ItemInterface {
         // 9,5 bytes already read (common data)
         item_type = huffmanLookupTable.readHuffmanEncodedString(pFile);
         iItemType = D2TxtFile.search(item_type);
+        if (iItemType == null) {
+            throw new D2ItemException("Unknown item type: " + item_type + getExStr());
+        }
         height = Short.parseShort(iItemType.get("invheight"));
         width = Short.parseShort(iItemType.get("invwidth"));
         image_file = iItemType.get("invfile");
@@ -383,7 +483,11 @@ public class D2Item implements Comparable, D2ItemInterface {
         }
 
         if (check_flag(22)) {
-            readMaterialStashStackSize(pFile);
+            if (readMaterialStash) {
+                readMaterialStashStackSize(pFile);
+            } else if (conversionContext != null) {
+                conversionContext.recordInsertion(pFile.get_pos());
+            }
         }
 
         D2TxtFileItemProperties lItemType = D2TxtFile.ITEM_TYPES.searchColumns(
@@ -411,9 +515,12 @@ public class D2Item implements Comparable, D2ItemInterface {
 
         if (iSocketNrFilled > 0) {
             iSocketedItems = new ArrayList<>();
+            if (conversionContext != null) {
+                conversionContext.recordAlignment(pFile.get_pos());
+            }
             pFile.set_pos(pFile.getNextByteBoundaryInBits());
             for (int i = 0; i < iSocketNrFilled; i++) {
-                D2Item lSocket = new D2Item(iFileName, pFile, iCharLvl);
+                D2Item lSocket = new D2Item(iFileName, pFile, iCharLvl, readMaterialStash, conversionContext);
                 iSocketedItems.add(lSocket);
 
                 if (lSocket.isJewel()) {
@@ -840,7 +947,15 @@ public class D2Item implements Comparable, D2ItemInterface {
             }
         }
 
-        int isStackableFlag = (int) pFile.read(1);
+        int isStackableFlag;
+        if (readMaterialStash) {
+            isStackableFlag = (int) pFile.read(1);
+        } else {
+            isStackableFlag = 0;
+            if (conversionContext != null) {
+                conversionContext.recordInsertion(pFile.get_pos());
+            }
+        }
         if ("1".equals(iItemType.get("stackable")) || isStackableFlag == 1) {
             iStackable = true;
             iCurDur = (short) pFile.read(9);
@@ -878,7 +993,11 @@ public class D2Item implements Comparable, D2ItemInterface {
             pFile.skipBits(16 + 32 + 4); //16 monster id + 32 time found + 4 unknown
         }
 
-        readMaterialStashStackSize(pFile);
+        if (readMaterialStash) {
+            readMaterialStashStackSize(pFile);
+        } else if (conversionContext != null) {
+            conversionContext.recordInsertion(pFile.get_pos());
+        }
     }
 
     private boolean isStackableInTxtFiles() {
