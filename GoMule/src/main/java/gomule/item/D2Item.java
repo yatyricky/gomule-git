@@ -667,8 +667,26 @@ public class D2Item implements Comparable, D2ItemInterface {
                     .getRow(rare_name_1 - 156);
             D2TxtFileItemProperties lRareName2 = D2TxtFile.RARESUFFIX
                     .getRow(rare_name_2 - 1);
-            iItemName = D2Files.getInstance().getTranslations().getTranslation(lRareName1.get("name")) + " "
-                    + D2Files.getInstance().getTranslations().getTranslation(lRareName2.get("name"));
+            
+            String rareName1 = lRareName1.get("name");
+            String rareName2 = lRareName2.get("name");
+            
+            // Handle missing translations gracefully - show ID if translation not found
+            String translatedName1 = (rareName1 != null && !rareName1.isEmpty()) 
+                ? D2Files.getInstance().getTranslations().getTranslationOrNull(rareName1) 
+                : null;
+            String translatedName2 = (rareName2 != null && !rareName2.isEmpty()) 
+                ? D2Files.getInstance().getTranslations().getTranslationOrNull(rareName2) 
+                : null;
+            
+            // Fallback to showing the translation key if translation is missing
+            if (translatedName1 == null) translatedName1 = (rareName1 != null && !rareName1.isEmpty()) ? rareName1 : "";
+            if (translatedName2 == null) translatedName2 = (rareName2 != null && !rareName2.isEmpty()) ? rareName2 : "";
+            
+            iItemName = (translatedName1 + " " + translatedName2).trim();
+            if (iItemName.isEmpty()) {
+                iItemName = "Rare " + getBaseItemName(); // Fallback to base item name
+            }
 
             rare_prefixes = new short[3];
             rare_suffixes = new short[3];
