@@ -2,6 +2,7 @@ package gomule.d2i;
 
 import com.google.common.io.BaseEncoding;
 import gomule.d2i.D2SharedStash.D2SharedStashPane;
+import gomule.d2i.D2Chronicle.ChronicleEntry;
 import gomule.item.D2Item;
 import gomule.model.VersionController;
 import gomule.model.VersionController.Variant;
@@ -27,7 +28,15 @@ public class D2SharedStashReader {
             bitReader.set_byte_pos(stashHeaderOffsets[i]);
             result.add(readSharedStashPane(bitReader, filename));
         }
-        return new D2SharedStash(expectedVariant, filename, result, bitReader.getFileContent());
+        D2Chronicle chronicle = null;
+        int totalPanes = expectedVariant.getSharedStashConfig().getTotalStashPaneCount();
+        if (totalPanes > expectedVariant.getSharedStashConfig().getItemStashPaneCount()) {
+            for (int i = expectedVariant.getSharedStashConfig().getItemStashPaneCount(); i < totalPanes; i++) {
+                chronicle = tryReadChroniclePane(bitReader, stashHeaderOffsets[i]);
+                if (chronicle != null) break;
+            }
+        }
+        return new D2SharedStash(expectedVariant, filename, result, bitReader.getFileContent(), chronicle);
     }
 
     public static int[] getStashHeaderOffsets(Variant expectedVariant, D2BitReader bitReader) {
@@ -54,5 +63,88 @@ public class D2SharedStashReader {
         if (calculatedLength != header.getLength())
             throw new RuntimeException("Incorrect shared stash length: " + calculatedLength + " expected: " + header.getLength());
         return D2SharedStashPane.fromItems(result, header.getGold());
+    }
+
+    static final byte[] CHRONICLE_MAGIC = BaseEncoding.base16().decode("C0EDEAC0");
+
+    private D2Chronicle tryReadChroniclePane(D2BitReader bitReader, int paneOffset) {
+        try {
+            bitReader.set_byte_pos(paneOffset);
+            // Skip 64-byte standard pane header
+            bitReader.skipBytes(64);
+
+            // Check for C0EDEAC0 magic
+            byte[] magic = bitReader.get_bytes(4);
+            if (magic[0] != (byte) 0xC0 || magic[1] != (byte) 0xED || magic[2] != (byte) 0xEA || magic[3] != (byte) 0xC0) {
+                return null;
+            }
+            bitReader.set_byte_pos(bitReader.get_byte_pos() + 4);
+
+            // Read chronicle header
+            int version = readU16LE(bitReader);
+            int numSetItems = readU16LE(bitReader);
+            int numUniqueItems = readU16LE(bitReader);
+            int numRunewords = readU16LE(bitReader);
+
+            // Skip 12 bytes of reserved/padding
+            bitReader.skipBytes(12);
+
+            // Read set item entries
+            List<ChronicleEntry> setEntries = readChronicleEntries(bitReader, numSetItems);
+            List<ChronicleEntry> uniqueEntries = readChronicleEntries(bitReader, numUniqueItems);
+            List<ChronicleEntry> runewordEntries = readChronicleEntries(bitReader, numRunewords);
+
+            // Resolve item names using field6 as the item identifier
+            List<String> setNames = D2Chronicle.getChronicleSetItemNames(numSetItems);
+            List<String> uniqueNames = D2Chronicle.getChronicleUniqueItemNames(numUniqueItems);
+
+            for (int i = 0; i < setEntries.size() && i < setNames.size(); i++) {
+                setEntries.get(i).setItemName(setNames.get(i));
+            }
+            for (int i = 0; i < uniqueEntries.size() && i < uniqueNames.size(); i++) {
+                uniqueEntries.get(i).setItemName(uniqueNames.get(i));
+            }
+            // Runewords: field6 low byte is offset-encoded in modern RoW files.
+            for (ChronicleEntry entry : runewordEntries) {
+                entry.setItemName(D2Chronicle.getRunewordNameByField6(entry.getRawField6()));
+            }
+
+            return new D2Chronicle(version, numSetItems, numUniqueItems, numRunewords,
+                    setEntries, uniqueEntries, runewordEntries);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<ChronicleEntry> readChronicleEntries(D2BitReader bitReader, int count) {
+        List<ChronicleEntry> entries = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            byte[] entryBytes = bitReader.get_bytes(10);
+            int pos = bitReader.get_byte_pos();
+            bitReader.set_byte_pos(pos + 10);
+
+            boolean allZero = true;
+            for (byte b : entryBytes) {
+                if (b != 0) { allZero = false; break; }
+            }
+
+            if (allZero) {
+                entries.add(new ChronicleEntry(false, 0, 0, 0));
+            } else {
+                int field0 = (entryBytes[0] & 0xFF) | ((entryBytes[1] & 0xFF) << 8);
+                long timestamp = (entryBytes[2] & 0xFFL) | ((entryBytes[3] & 0xFFL) << 8)
+                        | ((entryBytes[4] & 0xFFL) << 16) | ((entryBytes[5] & 0xFFL) << 24);
+                int field6 = (entryBytes[6] & 0xFF) | ((entryBytes[7] & 0xFF) << 8);
+                entries.add(new ChronicleEntry(true, timestamp, field0, field6));
+            }
+        }
+        return entries;
+    }
+
+    private int readU16LE(D2BitReader bitReader) {
+        byte[] bytes = bitReader.get_bytes(2);
+        int pos = bitReader.get_byte_pos();
+        bitReader.set_byte_pos(pos + 2);
+        return (bytes[0] & 0xFF) | ((bytes[1] & 0xFF) << 8);
     }
 }

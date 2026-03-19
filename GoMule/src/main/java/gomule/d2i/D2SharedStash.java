@@ -15,12 +15,18 @@ public class D2SharedStash extends D2ItemListAdapter {
     private final List<D2SharedStashPane> panes;
     private final byte[] originalContent;
     private final D2SharedStashWriter sharedStashWriter;
+    private final D2Chronicle chronicle;
 
     public D2SharedStash(Variant variant, String pFileName, List<D2SharedStashPane> panes, byte[] originalContent) {
+        this(variant, pFileName, panes, originalContent, null);
+    }
+
+    public D2SharedStash(Variant variant, String pFileName, List<D2SharedStashPane> panes, byte[] originalContent, D2Chronicle chronicle) {
         super(pFileName);
         this.panes = panes;
         this.originalContent = originalContent;
         this.sharedStashWriter = new D2SharedStashWriter(variant, pFileName, originalContent);
+        this.chronicle = chronicle;
     }
 
     public D2SharedStashPane getPane(int index) {
@@ -29,6 +35,10 @@ public class D2SharedStash extends D2ItemListAdapter {
 
     public List<D2SharedStashPane> getPanes() {
         return panes;
+    }
+
+    public D2Chronicle getChronicle() {
+        return chronicle;
     }
 
     @Override

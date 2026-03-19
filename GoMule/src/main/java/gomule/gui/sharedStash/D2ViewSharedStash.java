@@ -1,5 +1,6 @@
 package gomule.gui.sharedStash;
 
+import gomule.d2i.D2Chronicle;
 import gomule.d2i.D2SharedStash;
 import gomule.gui.D2FileManager;
 import gomule.gui.D2ItemContainer;
@@ -16,6 +17,8 @@ public class D2ViewSharedStash extends JInternalFrame implements D2ItemContainer
     private final D2FileManager fileManager;
     private final String sharedStashFilename;
     private final SharedStashPanel sharedStashPanel;
+    private final JTabbedPane tabbedPane;
+    private final ChroniclePanel chroniclePanel;
     private D2SharedStash sharedStash;
 
     public D2ViewSharedStash(D2FileManager fileManager, String sharedStashFilename) {
@@ -31,7 +34,14 @@ public class D2ViewSharedStash extends JInternalFrame implements D2ItemContainer
         ToolTipManager.sharedInstance().setDismissDelay(40000);
         ToolTipManager.sharedInstance().setInitialDelay(300);
         sharedStashPanel = new SharedStashPanel(fileManager, this);
-        setContentPane(sharedStashPanel);
+
+        chroniclePanel = new ChroniclePanel();
+
+        tabbedPane = new JTabbedPane();
+        tabbedPane.addTab("Stash", sharedStashPanel);
+        tabbedPane.addTab("Chronicle", chroniclePanel);
+
+        setContentPane(tabbedPane);
         connect();
         setVisible(true);
         pack();
@@ -114,6 +124,13 @@ public class D2ViewSharedStash extends JInternalFrame implements D2ItemContainer
         }
         setTitle(lTitle);
         sharedStashPanel.build();
+        updateChronicleTab();
+    }
+
+    private void updateChronicleTab() {
+        D2Chronicle chronicle = (sharedStash != null) ? sharedStash.getChronicle() : null;
+        chroniclePanel.setChronicle(chronicle);
+        tabbedPane.setEnabledAt(1, chronicle != null);
     }
 
     public String getSharedStashName() {

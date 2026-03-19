@@ -45,6 +45,7 @@ public class D2SharedStashReaderTest {
                 singletonList("Scroll of Town Portal\n" + "Version: Resurrected\n"), getItemDumps(stash.getPane(0)));
         assertEquals(singletonList("Scroll of Identify\n" + "Version: Resurrected\n"), getItemDumps(stash.getPane(1)));
         assertEquals(emptyList(), getItemDumps(stash.getPane(2)));
+        assertNull(stash.getChronicle());
         StringWriter out = new StringWriter();
         stash.fullDump(new PrintWriter(out));
         assertEquals(
@@ -78,6 +79,17 @@ public class D2SharedStashReaderTest {
         assertEquals(singletonList("Super Healing Potion\n" +
                 "Version: Resurrected\n" +
                 "Replenish Life +320\n"), getItemDumps(stash.getPane(1)));
+
+        // Verify chronicle was parsed
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+        assertEquals(1, chronicle.getVersion());
+        assertEquals(0, chronicle.getNumSetItems());
+        assertEquals(0, chronicle.getNumUniqueItems());
+        assertEquals(0, chronicle.getNumRunewords());
+        assertEquals(0, chronicle.getTotalFound());
+        assertEquals(0, chronicle.getTotalItems());
+
         assertEquals(singletonList("Stamina Potion\n" +
                 "Version: Resurrected\n" +
                 "Heal Stamina Plus 5000%\n"), getItemDumps(stash.getPane(2)));
