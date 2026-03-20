@@ -124,7 +124,16 @@ public class D2SharedStash extends D2ItemListAdapter {
             for (D2Item item : items) {
                 for (int i = item.get_col(); i < (int) item.get_col() + (int) item.get_width(); i++) {
                     for (int j = item.get_row(); j < (int) item.get_row() + (int) item.get_height(); j++) {
-                        if (grid[i][j] != null) throw new RuntimeException("Failed to create shared stash pane");
+                        if (i < 0 || i >= grid.length || j < 0 || j >= grid[0].length) {
+                            throw new RuntimeException("Failed to create shared stash pane: item out of bounds: "
+                                    + item.getItemName() + " at col=" + item.get_col() + ", row=" + item.get_row()
+                                    + ", width=" + item.get_width() + ", height=" + item.get_height());
+                        }
+                        if (grid[i][j] != null) {
+                            throw new RuntimeException("Failed to create shared stash pane: overlap between "
+                                    + item.getItemName() + " and " + grid[i][j].getItemName()
+                                    + " at cell (" + i + "," + j + ")");
+                        }
                         grid[i][j] = item;
                     }
                 }

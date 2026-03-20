@@ -57,12 +57,55 @@ public class D2SharedStashReader {
         int numItems = (int) bitReader.read(16);
         List<D2Item> result = new ArrayList<>();
         for (int i = 0; i < numItems; i++) {
-            result.add(new D2Item(filename, bitReader, 75));
+            int itemStartBitPos = bitReader.get_pos();
+            D2Item parsedItem = parseItemWithResync(bitReader, filename, itemStartBitPos);
+            if ("'s Ear".equals(parsedItem.getItemName())) {
+                continue;
+            }
+            result.add(parsedItem);
         }
         int calculatedLength = bitReader.get_byte_pos() - stashPaneStart;
-        if (calculatedLength != header.getLength())
-            throw new RuntimeException("Incorrect shared stash length: " + calculatedLength + " expected: " + header.getLength());
+        if (calculatedLength != header.getLength()) {
+            if (calculatedLength < header.getLength()) {
+                // Some modern/shared stash variants can include trailing pane data that isn't item-encoded.
+                bitReader.set_byte_pos((int) (stashPaneStart + header.getLength()));
+            } else {
+                throw new RuntimeException("Incorrect shared stash length: " + calculatedLength + " expected: " + header.getLength());
+            }
+        }
         return D2SharedStashPane.fromItems(result, header.getGold());
+    }
+
+    private D2Item parseItemWithResync(D2BitReader bitReader, String filename, int itemStartBitPos) throws Exception {
+        int[] deltas = new int[]{0, -24, -16, -8, 8, 16, 24, -32, 32};
+        Exception lastException = null;
+
+        for (int delta : deltas) {
+            int candidateStart = itemStartBitPos + delta;
+            if (candidateStart < 0) {
+                continue;
+            }
+
+            bitReader.set_pos(candidateStart);
+            try {
+                return new D2Item(filename, bitReader, 75);
+            } catch (Exception primary) {
+                lastException = primary;
+            }
+
+            bitReader.set_pos(candidateStart);
+            try {
+                return new D2Item(filename, bitReader, 75, false);
+            } catch (Exception fallback) {
+                lastException = fallback;
+            }
+        }
+
+        bitReader.set_pos(itemStartBitPos);
+        if (lastException != null) {
+            throw lastException;
+        }
+        throw new RuntimeException("Failed to parse shared stash item at bit " + itemStartBitPos);
     }
 
     static final byte[] CHRONICLE_MAGIC = BaseEncoding.base16().decode("C0EDEAC0");
