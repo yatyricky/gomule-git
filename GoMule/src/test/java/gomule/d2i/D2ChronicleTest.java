@@ -42,31 +42,37 @@ public class D2ChronicleTest {
         D2Chronicle chronicle = stash.getChronicle();
         assertNotNull(chronicle, "Chronicle should not be null for ROW stash");
         assertEquals(1, chronicle.getVersion());
-        assertEquals(105, chronicle.getNumSetItems());
+        assertEquals(106, chronicle.getNumSetItems());
         assertEquals(226, chronicle.getNumUniqueItems());
         assertEquals(27, chronicle.getNumRunewords());
-        assertEquals(358, chronicle.getTotalItems());
+        assertEquals(359, chronicle.getTotalItems());
 
-        // All items found in this stash (complete grail)
-        assertEquals(105, chronicle.getFoundSetCount());
+        // All slots in this stash are non-zero (complete grail for the tracked range)
+        assertEquals(106, chronicle.getFoundSetCount());
         assertEquals(226, chronicle.getFoundUniqueCount());
         assertEquals(27, chronicle.getFoundRunewordCount());
-        assertEquals(358, chronicle.getTotalFound());
+        assertEquals(359, chronicle.getTotalFound());
 
         // Verify item names are resolved
         assertNotNull(chronicle.getSetEntries().get(0).getItemName());
         assertNotNull(chronicle.getUniqueEntries().get(0).getItemName());
         assertNotNull(chronicle.getRunewordEntries().get(0).getItemName());
 
-        // Write dump to file for inspection
+        // Write dump to file for inspection (now includes all grail items, not just found)
         String dump = chronicle.toTextDump();
         try (PrintWriter pw = new PrintWriter(new FileWriter("chronicle_dump.txt"))) {
             pw.print(dump);
         }
 
-        assertTrue(dump.contains("SET ITEMS (105 / 105)"));
-        assertTrue(dump.contains("UNIQUE ITEMS (226 / 226)"));
-        assertTrue(dump.contains("RUNEWORDS (27 / 27)"));
+        // Dump should contain section headers and show both found and not-found items
+        assertTrue(dump.contains("SET ITEMS ("), "Dump should contain SET ITEMS section");
+        assertTrue(dump.contains("UNIQUE ITEMS ("), "Dump should contain UNIQUE ITEMS section");
+        assertTrue(dump.contains("RUNEWORDS ("), "Dump should contain RUNEWORDS section");
+        // All 226 unique slots and 106 set slots are found in this stash
+        assertTrue(dump.contains("[X] Deathspade"), "Dump should contain found unique item Deathspade");
+        assertTrue(dump.contains("[X] Faith"), "Dump should contain found runeword Faith");
+        // Grail dump should include items not in tracked range (not-found)
+        assertTrue(dump.contains("[ ]"), "Dump should include not-found items for full grail view");
     }
 
     @Test

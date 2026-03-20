@@ -49,6 +49,85 @@ public class D2Chronicle {
     public int getTotalItems() { return numSetItems + numUniqueItems + numRunewords; }
 
     /**
+     * Returns grail entries for ALL chronicle-eligible unique items.
+     * Items in binary slots 0..numUniqueItems-1 are found if their slot is non-zero.
+     * Items beyond the tracked slot count are shown as not-found.
+     */
+    public List<ChronicleEntry> getUniqueGrailEntries() {
+        // uniqueitems.txt uses "code" for the base item type code.
+        return buildGrailEntries(D2TxtFile.UNIQUES, uniqueEntries, "disableChronicle", "code", "UniqueItem");
+    }
+
+    /**
+     * Returns grail entries for ALL chronicle-eligible set items.
+     * Items in binary slots 0..numSetItems-1 are found if their slot is non-zero.
+     * Items beyond the tracked slot count are shown as not-found.
+     */
+    public List<ChronicleEntry> getSetGrailEntries() {
+        // setitems.txt uses "item" for the base item type code (no "code" column).
+        return buildGrailEntries(D2TxtFile.SETITEMS, setEntries, "disableChronicle", "item", "SetItem");
+    }
+
+    private List<ChronicleEntry> buildGrailEntries(D2TxtFile txtFile, List<ChronicleEntry> binarySlots,
+                                                    String disableCol, String codeCol, String prefix) {
+        // Build set of found item *IDs from binary chronicle entries.
+        // For set/unique items, field6 = *ID of the item (the game's internal numeric identifier).
+        Set<Integer> foundIds = new HashSet<>();
+        for (ChronicleEntry slot : binarySlots) {
+            if (slot.isFound()) {
+                foundIds.add(slot.getRawField6());
+            }
+        }
+
+        List<ChronicleEntry> result = new ArrayList<>();
+        int ordinal = 0;
+        for (int i = 0; i < txtFile.getRowSize(); i++) {
+            D2TxtFileItemProperties row = txtFile.getRow(i);
+
+            // Skip rows with no *ID or no item-type code (header/separator rows).
+            String idStr = row.get("*ID");
+            if (idStr == null || idStr.isEmpty()) continue;
+            String code = row.get(codeCol);
+            if (code == null || code.isEmpty()) continue;
+
+            // Skip non-spawnable items.
+            if (!"1".equals(row.get("spawnable"))) continue;
+
+            // Skip chronicle-disabled items.
+            if ("1".equals(row.get(disableCol))) continue;
+
+            String name = row.get("index");
+            if (name == null || name.isEmpty()) name = row.get("*ID");
+            if (name == null || name.isEmpty()) name = prefix + "#" + ordinal;
+
+            // Determine found status by matching this item's *ID against the set of found IDs.
+            boolean found = false;
+            try {
+                found = foundIds.contains(Integer.parseInt(idStr));
+            } catch (NumberFormatException ignored) {
+            }
+
+            ChronicleEntry grailEntry = new ChronicleEntry(found, 0, 0, ordinal);
+            grailEntry.setItemName(name);
+            result.add(grailEntry);
+            ordinal++;
+        }
+        return result;
+    }
+
+    /**
+     * Look up an item name from a txt file by its *ID column value.
+     * Returns null if not found.
+     */
+    static String getItemNameByAstrixId(D2TxtFile txtFile, int uniqueId) {
+        D2TxtFileItemProperties row = txtFile.searchColumns("*ID", String.valueOf(uniqueId));
+        if (row == null) return null;
+        String name = row.get("index");
+        if (name == null || name.isEmpty()) name = row.get("*ID");
+        return (name != null && !name.isEmpty()) ? name : null;
+    }
+
+    /**
      * Returns a list of ChronicleEntry for ALL complete runewords in runes.txt.
      * Entries that match a found runeword (by row index encoded in field6) have found=true.
      * All other complete runewords have found=false.
@@ -87,11 +166,21 @@ public class D2Chronicle {
         StringBuilder sb = new StringBuilder();
         sb.append("=== Chronicle / Holy Grail ===\n");
         sb.append(String.format("Version: %d\n", version));
-        sb.append(String.format("Total Progress: %d / %d\n\n", getTotalFound(), getTotalItems()));
 
-        appendSection(sb, "SET ITEMS", setEntries, numSetItems, getFoundSetCount());
-        appendSection(sb, "UNIQUE ITEMS", uniqueEntries, numUniqueItems, getFoundUniqueCount());
-        appendSection(sb, "RUNEWORDS", runewordEntries, numRunewords, getFoundRunewordCount());
+        List<ChronicleEntry> setGrail = getSetGrailEntries();
+        List<ChronicleEntry> uniqueGrail = getUniqueGrailEntries();
+        List<ChronicleEntry> runeGrail = getRunewordGrailEntries();
+
+        long setFound = setGrail.stream().filter(ChronicleEntry::isFound).count();
+        long uniqueFound = uniqueGrail.stream().filter(ChronicleEntry::isFound).count();
+        long runeFound = runeGrail.stream().filter(ChronicleEntry::isFound).count();
+        long totalFound = setFound + uniqueFound + runeFound;
+        long totalItems = setGrail.size() + uniqueGrail.size() + runeGrail.size();
+        sb.append(String.format("Total Progress: %d / %d\n\n", totalFound, totalItems));
+
+        appendSection(sb, "SET ITEMS", setGrail, setGrail.size(), (int) setFound);
+        appendSection(sb, "UNIQUE ITEMS", uniqueGrail, uniqueGrail.size(), (int) uniqueFound);
+        appendSection(sb, "RUNEWORDS", runeGrail, runeGrail.size(), (int) runeFound);
 
         return sb.toString();
     }
@@ -116,6 +205,16 @@ public class D2Chronicle {
 
     public static List<String> getChronicleUniqueItemNames(int count) {
         return getChronicleItemNames(D2TxtFile.UNIQUES, "disableChronicle", count);
+    }
+
+    public static String getSetItemNameByField6(int field6) {
+        String name = tryGetChronicleItemNameByField6(D2TxtFile.SETITEMS, field6);
+        return name != null ? name : "SetItem#" + (field6 & 0xFFFF);
+    }
+
+    public static String getUniqueItemNameByField6(int field6) {
+        String name = tryGetChronicleItemNameByField6(D2TxtFile.UNIQUES, field6);
+        return name != null ? name : "UniqueItem#" + (field6 & 0xFFFF);
     }
 
     /**
@@ -176,6 +275,25 @@ public class D2Chronicle {
             }
         }
         return names;
+    }
+
+    static String tryGetChronicleItemNameByField6(D2TxtFile txtFile, int field6) {
+        int rowSize = txtFile.getRowSize();
+        int[] candidates = new int[]{field6 & 0xFFFF, field6 & 0xFF};
+        for (int rowIndex : candidates) {
+            if (rowIndex < 0 || rowIndex >= rowSize) {
+                continue;
+            }
+            D2TxtFileItemProperties row = txtFile.getRow(rowIndex);
+            String name = row.get("index");
+            if (name == null || name.isEmpty()) {
+                name = row.get("*ID");
+            }
+            if (name != null && !name.isEmpty()) {
+                return name;
+            }
+        }
+        return null;
     }
 
     public static class ChronicleEntry {

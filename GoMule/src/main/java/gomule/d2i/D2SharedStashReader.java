@@ -7,6 +7,7 @@ import gomule.item.D2Item;
 import gomule.model.VersionController;
 import gomule.model.VersionController.Variant;
 import gomule.util.D2BitReader;
+import randall.d2files.D2TxtFile;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -137,15 +138,19 @@ public class D2SharedStashReader {
             List<ChronicleEntry> uniqueEntries = readChronicleEntries(bitReader, numUniqueItems);
             List<ChronicleEntry> runewordEntries = readChronicleEntries(bitReader, numRunewords);
 
-            // Resolve item names using field6 as the item identifier
-            List<String> setNames = D2Chronicle.getChronicleSetItemNames(numSetItems);
-            List<String> uniqueNames = D2Chronicle.getChronicleUniqueItemNames(numUniqueItems);
-
-            for (int i = 0; i < setEntries.size() && i < setNames.size(); i++) {
-                setEntries.get(i).setItemName(setNames.get(i));
+            // Set/unique entries use field6 = *ID of the found item.
+            // Assign names by looking up the *ID value in the respective txt file.
+            for (ChronicleEntry entry : setEntries) {
+                if (entry.isFound()) {
+                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.SETITEMS, entry.getRawField6());
+                    entry.setItemName(name != null ? name : "SetItem#" + entry.getRawField6());
+                }
             }
-            for (int i = 0; i < uniqueEntries.size() && i < uniqueNames.size(); i++) {
-                uniqueEntries.get(i).setItemName(uniqueNames.get(i));
+            for (ChronicleEntry entry : uniqueEntries) {
+                if (entry.isFound()) {
+                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.UNIQUES, entry.getRawField6());
+                    entry.setItemName(name != null ? name : "UniqueItem#" + entry.getRawField6());
+                }
             }
             // Runewords: field6 low byte is offset-encoded in modern RoW files.
             for (ChronicleEntry entry : runewordEntries) {
