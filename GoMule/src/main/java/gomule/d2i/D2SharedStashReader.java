@@ -183,7 +183,8 @@ public class D2SharedStashReader {
                 long timestamp = (entryBytes[2] & 0xFFL) | ((entryBytes[3] & 0xFFL) << 8)
                         | ((entryBytes[4] & 0xFFL) << 16) | ((entryBytes[5] & 0xFFL) << 24);
                 int field6 = (entryBytes[6] & 0xFF) | ((entryBytes[7] & 0xFF) << 8);
-                entries.add(new ChronicleEntry(true, timestamp, field0, field6));
+                int field8 = (entryBytes[8] & 0xFF) | ((entryBytes[9] & 0xFF) << 8);
+                entries.add(new ChronicleEntry(true, timestamp, field0, field6, field8));
             }
         }
         return entries;

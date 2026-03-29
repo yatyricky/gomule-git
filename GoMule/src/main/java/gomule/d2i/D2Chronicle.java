@@ -4,20 +4,39 @@ import randall.d2files.D2TxtFile;
 import randall.d2files.D2TxtFileItemProperties;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class D2Chronicle {
 
-    // RoW chronicle runeword entries store an offset-encoded id in field6 low byte.
-    // Most entries decode as: row = (encoded - 27) & 0xFF.
-    private static final int RUNEWORD_FIELD6_OFFSET = 27;
+    // Standard RoW chronicle runeword field6 encoding:
+    //   field6 = RUNEWORD_FIELD6_STANDARD_BASE + runes.txt_row_index
+    // This works for the majority of entries (hi byte = 0x50).
+    // Non-standard entries (Smoke, Cure, Delirium, etc.) use different bases
+    // and are handled via an explicit outlier map.
+    private static final int RUNEWORD_FIELD6_STANDARD_BASE = 0x501B;
+
+    // Known non-standard field6 values observed in game save data.
+    // Key = full 16-bit field6, Value = runes.txt row index.
+    private static final Map<Integer, Integer> RUNEWORD_FIELD6_OUTLIERS = new HashMap<>();
+    static {
+        RUNEWORD_FIELD6_OUTLIERS.put(0x0000, 126); // Smoke
+        RUNEWORD_FIELD6_OUTLIERS.put(0x6AE7, 176); // Cure
+        RUNEWORD_FIELD6_OUTLIERS.put(0x2A9E,  21); // Delirium
+    }
+
+    // Baal (baalcrab) monstats *hcIdx — used as the drop-source field0 when
+    // programmatically marking set/unique items as found.
+    private static final int BAAL_FIELD0 = 544;
 
     private final int version;
-    private final int numSetItems;
-    private final int numUniqueItems;
-    private final int numRunewords;
+    private int numSetItems;
+    private int numUniqueItems;
+    private int numRunewords;
+    private boolean modified;
     private final List<ChronicleEntry> setEntries;
     private final List<ChronicleEntry> uniqueEntries;
     private final List<ChronicleEntry> runewordEntries;
@@ -29,6 +48,7 @@ public class D2Chronicle {
         this.numSetItems = numSetItems;
         this.numUniqueItems = numUniqueItems;
         this.numRunewords = numRunewords;
+        this.modified = false;
         this.setEntries = setEntries;
         this.uniqueEntries = uniqueEntries;
         this.runewordEntries = runewordEntries;
@@ -38,6 +58,7 @@ public class D2Chronicle {
     public int getNumSetItems() { return numSetItems; }
     public int getNumUniqueItems() { return numUniqueItems; }
     public int getNumRunewords() { return numRunewords; }
+    public boolean isModified() { return modified; }
     public List<ChronicleEntry> getSetEntries() { return setEntries; }
     public List<ChronicleEntry> getUniqueEntries() { return uniqueEntries; }
     public List<ChronicleEntry> getRunewordEntries() { return runewordEntries; }
@@ -47,6 +68,72 @@ public class D2Chronicle {
     public int getFoundRunewordCount() { return (int) runewordEntries.stream().filter(ChronicleEntry::isFound).count(); }
     public int getTotalFound() { return getFoundSetCount() + getFoundUniqueCount() + getFoundRunewordCount(); }
     public int getTotalItems() { return numSetItems + numUniqueItems + numRunewords; }
+
+    public enum Section {
+        UNIQUE,
+        SET,
+        RUNEWORDS
+    }
+
+    public boolean markFound(Section section, int grailIndex) {
+        boolean changed;
+        switch (section) {
+            case UNIQUE:
+                changed = markSetOrUniqueFound(getUniqueGrailEntries(), uniqueEntries, grailIndex, true);
+                break;
+            case SET:
+                changed = markSetOrUniqueFound(getSetGrailEntries(), setEntries, grailIndex, false);
+                break;
+            case RUNEWORDS:
+            default:
+                changed = markRunewordFound(grailIndex);
+                break;
+        }
+        if (changed) {
+            modified = true;
+        }
+        return changed;
+    }
+
+    public boolean markNotFound(Section section, int grailIndex) {
+        boolean changed;
+        switch (section) {
+            case UNIQUE:
+                changed = markSetOrUniqueNotFound(getUniqueGrailEntries(), uniqueEntries, grailIndex, true);
+                break;
+            case SET:
+                changed = markSetOrUniqueNotFound(getSetGrailEntries(), setEntries, grailIndex, false);
+                break;
+            case RUNEWORDS:
+            default:
+                changed = markRunewordNotFound(grailIndex);
+                break;
+        }
+        if (changed) {
+            modified = true;
+        }
+        return changed;
+    }
+
+    public boolean toggleFound(Section section, int grailIndex) {
+        List<ChronicleEntry> entries;
+        switch (section) {
+            case UNIQUE:
+                entries = getUniqueGrailEntries();
+                break;
+            case SET:
+                entries = getSetGrailEntries();
+                break;
+            case RUNEWORDS:
+            default:
+                entries = getRunewordGrailEntries();
+                break;
+        }
+        if (grailIndex < 0 || grailIndex >= entries.size()) {
+            return false;
+        }
+        return entries.get(grailIndex).isFound() ? markNotFound(section, grailIndex) : markFound(section, grailIndex);
+    }
 
     /**
      * Returns grail entries for ALL chronicle-eligible unique items.
@@ -70,12 +157,11 @@ public class D2Chronicle {
 
     private List<ChronicleEntry> buildGrailEntries(D2TxtFile txtFile, List<ChronicleEntry> binarySlots,
                                                     String disableCol, String codeCol, String prefix) {
-        // Build set of found item *IDs from binary chronicle entries.
-        // For set/unique items, field6 = *ID of the item (the game's internal numeric identifier).
-        Set<Integer> foundIds = new HashSet<>();
+        // Build a map from *ID to the matching binary entry (for found items).
+        Map<Integer, ChronicleEntry> foundById = new HashMap<>();
         for (ChronicleEntry slot : binarySlots) {
             if (slot.isFound()) {
-                foundIds.add(slot.getRawField6());
+                foundById.put(slot.getRawField6(), slot);
             }
         }
 
@@ -100,14 +186,20 @@ public class D2Chronicle {
             if (name == null || name.isEmpty()) name = row.get("*ID");
             if (name == null || name.isEmpty()) name = prefix + "#" + ordinal;
 
-            // Determine found status by matching this item's *ID against the set of found IDs.
-            boolean found = false;
+            // Determine found status by matching this item's *ID against the found map.
+            int id = 0;
             try {
-                found = foundIds.contains(Integer.parseInt(idStr));
+                id = Integer.parseInt(idStr);
             } catch (NumberFormatException ignored) {
             }
 
-            ChronicleEntry grailEntry = new ChronicleEntry(found, 0, 0, ordinal);
+            ChronicleEntry binaryEntry = foundById.get(id);
+            ChronicleEntry grailEntry;
+            if (binaryEntry != null) {
+                grailEntry = new ChronicleEntry(true, binaryEntry.getRawTimestamp(), binaryEntry.getRawField0(), id);
+            } else {
+                grailEntry = new ChronicleEntry(false, 0, 0, id);
+            }
             grailEntry.setItemName(name);
             result.add(grailEntry);
             ordinal++;
@@ -134,13 +226,13 @@ public class D2Chronicle {
      * This is used to build the full Holy Grail view.
      */
     public List<ChronicleEntry> getRunewordGrailEntries() {
-        // Build a set of found runes.txt row indices
-        Set<Integer> foundRowIndices = new HashSet<>();
+        // Build a map from runes.txt row index to the matching binary entry
+        Map<Integer, ChronicleEntry> foundByRow = new HashMap<>();
         for (ChronicleEntry entry : runewordEntries) {
             if (entry.isFound()) {
                 int rowIndex = decodeRunewordRowIndex(entry.getRawField6());
                 if (rowIndex >= 0) {
-                    foundRowIndices.add(rowIndex);
+                    foundByRow.put(rowIndex, entry);
                 }
             }
         }
@@ -154,8 +246,13 @@ public class D2Chronicle {
             if (name == null || name.isEmpty()) name = row.get("Name");
             if (name == null || name.isEmpty()) continue;
 
-            boolean found = foundRowIndices.contains(i);
-            ChronicleEntry grailEntry = new ChronicleEntry(found, 0, 0, i);
+            ChronicleEntry binaryEntry = foundByRow.get(i);
+            ChronicleEntry grailEntry;
+            if (binaryEntry != null) {
+                grailEntry = new ChronicleEntry(true, binaryEntry.getRawTimestamp(), 0, i);
+            } else {
+                grailEntry = new ChronicleEntry(false, 0, 0, i);
+            }
             grailEntry.setItemName(name);
             result.add(grailEntry);
         }
@@ -235,30 +332,186 @@ public class D2Chronicle {
     }
 
     static int decodeRunewordRowIndex(int field6) {
-        int encoded = field6 & 0xFF;
+        int full = field6 & 0xFFFF;
         int rowSize = D2TxtFile.RUNES.getRowSize();
 
-        // Primary decode path used by modern RoW chronicles.
-        int decoded = (encoded - RUNEWORD_FIELD6_OFFSET) & 0xFF;
+        // 1. Check known non-standard field6 values first.
+        Integer outlier = RUNEWORD_FIELD6_OUTLIERS.get(full);
+        if (outlier != null) {
+            return outlier < rowSize ? outlier : -1;
+        }
+
+        // 2. Standard decode: field6 = 0x501B + row_index.
+        int row = full - RUNEWORD_FIELD6_STANDARD_BASE;
+        if (row >= 0 && row < rowSize) {
+            return row;
+        }
+
+        // 3. Legacy fallback: low byte - 27 (for older files).
+        int encoded = full & 0xFF;
+        int decoded = (encoded - 27) & 0xFF;
         if (decoded < rowSize) {
             return decoded;
         }
 
-        // Known outliers observed in live RoW stash data where ids decode
-        // outside local runes.txt row bounds.
-        if (encoded == 0xE7 && 176 < rowSize) {
-            return 176; // Cure
-        }
-        if (encoded == 0x00 && 126 < rowSize) {
-            return 126; // Smoke
-        }
-
-        // Compatibility fallback for older direct-index files.
+        // 4. Direct index fallback.
         if (encoded < rowSize) {
             return encoded;
         }
 
         return -1;
+    }
+
+    private boolean markRunewordFound(int grailIndex) {
+        List<ChronicleEntry> grail = getRunewordGrailEntries();
+        if (grailIndex < 0 || grailIndex >= grail.size()) {
+            return false;
+        }
+
+        ChronicleEntry grailEntry = grail.get(grailIndex);
+        int rowIndex = grailEntry.getRawField6();
+        for (ChronicleEntry entry : runewordEntries) {
+            if (!entry.isFound()) {
+                continue;
+            }
+            if (decodeRunewordRowIndex(entry.getRawField6()) == rowIndex) {
+                return false;
+            }
+        }
+
+        // Field6 = standard base + row index (produces 0x50xx values).
+        // Field0 bytes[0-1] is always 0x0000 in real game files.
+        // Timestamp bytes[2-5] must be non-zero for the game to recognise the entry as found.
+        int newField6 = RUNEWORD_FIELD6_STANDARD_BASE + rowIndex;
+        int newField0 = 0;
+        long timestamp = currentTimestamp();
+        int newField8 = 0;
+
+        ChronicleEntry newEntry = new ChronicleEntry(true, timestamp, newField0, newField6, newField8);
+        newEntry.setItemName(grailEntry.getItemName());
+
+        // The game keeps a sentinel entry (field6=0x0000) at the end of the
+        // runeword list.  New entries must be inserted BEFORE that sentinel,
+        // otherwise the game stops reading before it reaches the new entry.
+        int insertPos = runewordEntries.size();
+        for (int i = runewordEntries.size() - 1; i >= 0; i--) {
+            if (runewordEntries.get(i).getRawField6() == 0x0000) {
+                insertPos = i;
+                break;
+            }
+        }
+        runewordEntries.add(insertPos, newEntry);
+        numRunewords = runewordEntries.size();
+        return true;
+    }
+
+    private boolean markRunewordNotFound(int grailIndex) {
+        List<ChronicleEntry> grail = getRunewordGrailEntries();
+        if (grailIndex < 0 || grailIndex >= grail.size()) {
+            return false;
+        }
+
+        int rowIndex = grail.get(grailIndex).getRawField6();
+        for (int i = 0; i < runewordEntries.size(); i++) {
+            ChronicleEntry entry = runewordEntries.get(i);
+            if (!entry.isFound()) {
+                continue;
+            }
+            if (decodeRunewordRowIndex(entry.getRawField6()) == rowIndex) {
+                runewordEntries.remove(i);
+                numRunewords = runewordEntries.size();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean markSetOrUniqueFound(List<ChronicleEntry> grailEntries,
+                                         List<ChronicleEntry> binaryEntries,
+                                         int grailIndex,
+                                         boolean unique) {
+        if (grailIndex < 0 || grailIndex >= grailEntries.size()) {
+            return false;
+        }
+
+        ChronicleEntry grailEntry = grailEntries.get(grailIndex);
+        int astxId = grailEntry.getRawField6();
+
+        for (ChronicleEntry entry : binaryEntries) {
+            if (entry.isFound() && entry.getRawField6() == astxId) {
+                return false;
+            }
+        }
+
+        long timestamp = currentTimestamp();
+
+        ChronicleEntry foundEntry = new ChronicleEntry(true, timestamp, BAAL_FIELD0, astxId);
+        foundEntry.setItemName(grailEntry.getItemName());
+
+        for (int i = 0; i < binaryEntries.size(); i++) {
+            if (!binaryEntries.get(i).isFound()) {
+                binaryEntries.set(i, foundEntry);
+                return true;
+            }
+        }
+
+        binaryEntries.add(foundEntry);
+        if (unique) {
+            numUniqueItems = binaryEntries.size();
+        } else {
+            numSetItems = binaryEntries.size();
+        }
+        return true;
+    }
+
+    private boolean markSetOrUniqueNotFound(List<ChronicleEntry> grailEntries,
+                                            List<ChronicleEntry> binaryEntries,
+                                            int grailIndex,
+                                            boolean unique) {
+        if (grailIndex < 0 || grailIndex >= grailEntries.size()) {
+            return false;
+        }
+
+        int astxId = grailEntries.get(grailIndex).getRawField6();
+        for (int i = 0; i < binaryEntries.size(); i++) {
+            ChronicleEntry entry = binaryEntries.get(i);
+            if (entry.isFound() && entry.getRawField6() == astxId) {
+                binaryEntries.set(i, new ChronicleEntry(false, 0, 0, 0));
+                if (unique) {
+                    numUniqueItems = binaryEntries.size();
+                } else {
+                    numSetItems = binaryEntries.size();
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns the current time as a chronicle-compatible timestamp.
+     * The game stores timestamps as minutes since the Unix epoch.
+     */
+    private static long currentTimestamp() {
+        return System.currentTimeMillis() / 60000L;
+    }
+
+    /**
+     * Look up a monster name by its *hcIdx value (stored in chronicle field0
+     * for set/unique items).  Falls back to row-index lookup if *hcIdx search
+     * fails.  Returns null if no match is found.
+     */
+    public static String getMonsterNameByHcIdx(int hcIdx) {
+        if (hcIdx <= 0) return null;
+        D2TxtFileItemProperties row = D2TxtFile.MONSTATS.searchColumns("*hcIdx", String.valueOf(hcIdx));
+        if (row == null && hcIdx < D2TxtFile.MONSTATS.getRowSize()) {
+            row = D2TxtFile.MONSTATS.getRow(hcIdx);
+        }
+        if (row == null) return null;
+        String name = row.get("NameStr");
+        if (name != null && !name.isEmpty()) return name;
+        name = row.get("Id");
+        return (name != null && !name.isEmpty()) ? name : null;
     }
 
     private static List<String> getChronicleItemNames(D2TxtFile txtFile, String disableCol, int count) {
@@ -301,19 +554,26 @@ public class D2Chronicle {
         private final long rawTimestamp;
         private final int rawField0;
         private final int rawField6;
+        private final int rawField8;
         private String itemName;
 
         public ChronicleEntry(boolean found, long rawTimestamp, int rawField0, int rawField6) {
+            this(found, rawTimestamp, rawField0, rawField6, 0);
+        }
+
+        public ChronicleEntry(boolean found, long rawTimestamp, int rawField0, int rawField6, int rawField8) {
             this.found = found;
             this.rawTimestamp = rawTimestamp;
             this.rawField0 = rawField0;
             this.rawField6 = rawField6;
+            this.rawField8 = rawField8;
         }
 
         public boolean isFound() { return found; }
         public long getRawTimestamp() { return rawTimestamp; }
         public int getRawField0() { return rawField0; }
         public int getRawField6() { return rawField6; }
+        public int getRawField8() { return rawField8; }
         public String getItemName() { return itemName; }
         public void setItemName(String itemName) { this.itemName = itemName; }
     }

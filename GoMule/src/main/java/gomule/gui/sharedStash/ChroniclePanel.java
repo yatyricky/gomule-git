@@ -11,15 +11,18 @@ import java.util.List;
 
 class ChroniclePanel extends JPanel {
 
+    private final Runnable onChronicleChanged;
     private D2Chronicle chronicle;
     private final JList<ChronicleDisplayEntry> entryList = new JList<>();
     private final JEditorPane detailPane = new JEditorPane();
     private final JRadioButton uniqueBtn = new JRadioButton("Unique");
     private final JRadioButton setBtn = new JRadioButton("Set");
     private final JRadioButton runeWordsBtn = new JRadioButton("Rune Words");
+    private final JButton toggleFoundBtn = new JButton("Mark as Found");
     private ChronicleMode selectedMode = ChronicleMode.RUNEWORDS;
 
-    ChroniclePanel() {
+    ChroniclePanel(Runnable onChronicleChanged) {
+        this.onChronicleChanged = onChronicleChanged;
         setLayout(new BorderLayout(0, 2));
         setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
         setPreferredSize(new Dimension(SharedStashPanel.BG_WIDTH, SharedStashPanel.BG_HEIGHT));
@@ -39,6 +42,11 @@ class ChroniclePanel extends JPanel {
         radioRow.add(setBtn);
         radioRow.add(runeWordsBtn);
         add(radioRow, BorderLayout.NORTH);
+
+        JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 12, 2));
+        toggleFoundBtn.setEnabled(false);
+        actionRow.add(toggleFoundBtn);
+        add(actionRow, BorderLayout.SOUTH);
 
         // --- Chronicle split panel ---
         entryList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
@@ -64,6 +72,7 @@ class ChroniclePanel extends JPanel {
         runeWordsBtn.addActionListener(e -> switchMode(ChronicleMode.RUNEWORDS));
         uniqueBtn.addActionListener(e -> switchMode(ChronicleMode.UNIQUE));
         setBtn.addActionListener(e -> switchMode(ChronicleMode.SET));
+        toggleFoundBtn.addActionListener(e -> toggleSelectedFoundState());
 
         entryList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) updateDetail();
@@ -75,6 +84,7 @@ class ChroniclePanel extends JPanel {
         uniqueBtn.setEnabled(chronicle != null && !chronicle.getUniqueEntries().isEmpty());
         setBtn.setEnabled(chronicle != null && !chronicle.getSetEntries().isEmpty());
         runeWordsBtn.setEnabled(chronicle != null);
+        toggleFoundBtn.setEnabled(chronicle != null);
 
         if (selectedMode == ChronicleMode.UNIQUE && !uniqueBtn.isEnabled()) {
             selectedMode = setBtn.isEnabled() ? ChronicleMode.SET : ChronicleMode.RUNEWORDS;
@@ -125,17 +135,65 @@ class ChroniclePanel extends JPanel {
         } else {
             detailPane.setText("");
         }
+        updateToggleFoundButtonState();
     }
 
     private void updateDetail() {
         int idx = entryList.getSelectedIndex();
         if (idx < 0 || chronicle == null) {
             detailPane.setText("");
+            updateToggleFoundButtonState();
             return;
         }
         D2Chronicle.ChronicleEntry entry = getSelectedEntries().get(idx);
         detailPane.setText(buildDetailHtml(entry));
         detailPane.setCaretPosition(0);
+        updateToggleFoundButtonState();
+    }
+
+    private void toggleSelectedFoundState() {
+        if (chronicle == null) {
+            return;
+        }
+        int selectedIndex = entryList.getSelectedIndex();
+        if (selectedIndex < 0) {
+            return;
+        }
+        boolean changed = chronicle.toggleFound(toSection(selectedMode), selectedIndex);
+        if (!changed) {
+            return;
+        }
+        rebuildEntryList();
+        if (selectedIndex < entryList.getModel().getSize()) {
+            entryList.setSelectedIndex(selectedIndex);
+        }
+        if (onChronicleChanged != null) {
+            onChronicleChanged.run();
+        }
+    }
+
+    private D2Chronicle.Section toSection(ChronicleMode mode) {
+        switch (mode) {
+            case UNIQUE:
+                return D2Chronicle.Section.UNIQUE;
+            case SET:
+                return D2Chronicle.Section.SET;
+            case RUNEWORDS:
+            default:
+                return D2Chronicle.Section.RUNEWORDS;
+        }
+    }
+
+    private void updateToggleFoundButtonState() {
+        int selectedIndex = entryList.getSelectedIndex();
+        if (chronicle == null || selectedIndex < 0 || selectedIndex >= getSelectedEntries().size()) {
+            toggleFoundBtn.setEnabled(false);
+            toggleFoundBtn.setText("Mark as Found");
+            return;
+        }
+        toggleFoundBtn.setEnabled(true);
+        boolean isFound = getSelectedEntries().get(selectedIndex).isFound();
+        toggleFoundBtn.setText(isFound ? "Mark as Not Found" : "Mark as Found");
     }
 
     private List<D2Chronicle.ChronicleEntry> getSelectedEntries() {
@@ -175,11 +233,12 @@ class ChroniclePanel extends JPanel {
 
         sb.append("<b>Name:</b> ").append(esc(name != null ? name : "Unknown")).append("<br/>");
         sb.append("<b>Chronicle Id:</b> ").append(entry.getRawField6() & 0xFFFF).append("<br/>");
-        if (entry.getRawTimestamp() != 0) {
-            sb.append("<b>Timestamp:</b> ").append(entry.getRawTimestamp()).append("<br/>");
+        if (entry.isFound() && entry.getRawTimestamp() != 0) {
+            sb.append("<b>Found Time:</b> ").append(formatTimestamp(entry.getRawTimestamp())).append("<br/>");
         }
-        if (entry.getRawField0() != 0) {
-            sb.append("<b>Field0:</b> ").append(entry.getRawField0()).append("<br/>");
+        if (entry.isFound() && entry.getRawField0() != 0) {
+            String monsterName = D2Chronicle.getMonsterNameByHcIdx(entry.getRawField0());
+            sb.append("<b>Dropped By:</b> ").append(esc(monsterName != null ? monsterName : "Unknown (ID: " + entry.getRawField0() + ")")).append("<br/>");
         }
 
         sb.append("</body></html>");
@@ -202,6 +261,10 @@ class ChroniclePanel extends JPanel {
             sb.append("<font color='#999999'>\u2717 Not Found</font>");
         }
         sb.append("</center><hr/>");
+
+        if (entry.isFound() && entry.getRawTimestamp() != 0) {
+            sb.append("<b>Found Time:</b> ").append(formatTimestamp(entry.getRawTimestamp())).append("<br/>");
+        }
 
         if (row != null) {
             // Rune recipe
@@ -291,6 +354,13 @@ class ChroniclePanel extends JPanel {
     private static String esc(String s) {
         if (s == null) return "";
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private static String formatTimestamp(long ts) {
+        if (ts <= 0) return String.valueOf(ts);
+        // Timestamps are minutes since the Unix epoch.
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
+        return sdf.format(new java.util.Date(ts * 60L * 1000L));
     }
 
     // ── Inner classes ──────────────────────────────────────────────────────────
