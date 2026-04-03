@@ -200,3 +200,4 @@ gradle.properties
 
 #GoMule specific
 GoMule/projects/*
+projects/*
