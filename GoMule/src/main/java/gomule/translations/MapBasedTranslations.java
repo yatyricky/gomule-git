@@ -9,16 +9,21 @@ import com.google.common.io.CharStreams;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
+import java.util.stream.Collectors;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 public class MapBasedTranslations implements Translations {
     private final Map<String, String> translationData;
+    private final Map<String, List<String>> reverseMap;
 
     public MapBasedTranslations(Map<String, String> translationData) {
         this.translationData = translationData;
+        this.reverseMap = translationData.entrySet().stream()
+                .collect(Collectors.groupingBy(
+                        Map.Entry::getValue,
+                        Collectors.mapping(Map.Entry::getKey, Collectors.toList())));
     }
 
     public static Translations loadTranslations(InputStream inputStream) {
@@ -46,6 +51,12 @@ public class MapBasedTranslations implements Translations {
     @Override
     public String getTranslationOrNull(String key) {
         return translationData.get(key);
+    }
+
+    @Override
+    public List<String> getKeysForEnUS(String enUS) {
+        List<String> keys = reverseMap.get(enUS);
+        return keys != null ? keys : Collections.emptyList();
     }
 
     @Override

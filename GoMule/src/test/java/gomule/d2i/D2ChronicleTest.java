@@ -1105,4 +1105,1595 @@ public class D2ChronicleTest {
 
         System.out.println("\nOutput written to: " + outFile.getAbsolutePath());
     }
+
+    @Test
+    public void testMarkFoundOverwritesDuplicateSlot() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        int baselineCount = chronicle.getNumUniqueItems();
+        int baselineFound = chronicle.getFoundUniqueCount();
+
+        // Good file has all 247 slots filled (246 real + 1 sentinel).
+        // markFound should succeed by overwriting the sentinel, keeping count.
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int notFoundIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (!grail.get(i).isFound()) { notFoundIdx = i; break; }
+        }
+        assertTrue(notFoundIdx >= 0, "There should be grail entries not found in binary");
+        assertTrue(chronicle.markFound(D2Chronicle.Section.UNIQUE, notFoundIdx),
+                "markFound should succeed by overwriting sentinel");
+        assertEquals(baselineCount, chronicle.getNumUniqueItems(),
+                "Unique count must NOT grow (sentinel overwritten, not inserted)");
+        assertEquals(baselineFound, chronicle.getFoundUniqueCount(),
+                "Found count stays same (sentinel was already counted as found)");
+    }
+
+    @Test
+    public void testMarkUniqueFoundPersistsToD2i() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping unique persistence test: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        byte[] originalContent = sourceReader.getFileContent().clone();
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle, "Chronicle should exist in the sample stash");
+
+        int baselineUniqueCount = chronicle.getNumUniqueItems();
+        int baselineFoundUniques = chronicle.getFoundUniqueCount();
+
+        // Good file: all slots full — markFound overwrites last slot
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int targetIndex = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (!grail.get(i).isFound()) { targetIndex = i; break; }
+        }
+        assertTrue(targetIndex >= 0, "There must be at least one not-found unique in grail");
+        String targetName = grail.get(targetIndex).getItemName();
+        int targetAstxId = grail.get(targetIndex).getRawField6();
+        System.out.println("Marking unique as found: " + targetName + " (*ID=" + targetAstxId + ")");
+
+        assertTrue(chronicle.markFound(D2Chronicle.Section.UNIQUE, targetIndex),
+                "Marking a not-found unique should succeed via sentinel overwrite");
+        assertEquals(baselineUniqueCount, chronicle.getNumUniqueItems(),
+                "Unique count must NOT grow (sentinel overwritten, not inserted)");
+        assertEquals(baselineFoundUniques, chronicle.getFoundUniqueCount(),
+                "Found count stays same (sentinel was already counted as found)");
+
+        // Idempotency: marking the same item again should return false
+        assertFalse(chronicle.markFound(D2Chronicle.Section.UNIQUE, targetIndex),
+                "Marking an already-found unique should return false");
+
+        // Write and reload
+        File outFile = File.createTempFile("gomule-unique-mark-found", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        assertEquals(originalContent.length, writtenBytes.length,
+                "Written file must be same size (sentinel overwritten, not inserted)");
+
+        // Verify chronicle header counts in binary
+        int[] writtenOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(writtenBytes.clone()));
+        int writtenChronicleStart = writtenOffsets[writtenOffsets.length - 1];
+        int writtenUniqueCount = (writtenBytes[writtenChronicleStart + 72] & 0xFF)
+                | ((writtenBytes[writtenChronicleStart + 73] & 0xFF) << 8);
+        assertEquals(baselineUniqueCount, writtenUniqueCount,
+                "Binary unique count must NOT grow");
+
+        // Reload and verify
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle reloadedChronicle = reloaded.getChronicle();
+        assertNotNull(reloadedChronicle);
+        assertEquals(baselineUniqueCount, reloadedChronicle.getNumUniqueItems());
+        assertEquals(baselineFoundUniques, reloadedChronicle.getFoundUniqueCount());
+
+        // Verify the specific item is found with the correct *ID
+        boolean itemFound = false;
+        for (D2Chronicle.ChronicleEntry e : reloadedChronicle.getUniqueEntries()) {
+            if (e.isFound() && e.getRawField6() == targetAstxId) {
+                itemFound = true;
+                break;
+            }
+        }
+        assertTrue(itemFound, targetName + " (*ID=" + targetAstxId + ") should be found in reloaded chronicle");
+    }
+
+    @Test
+    public void testMarkSetFoundPersistsToD2i() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping set persistence test: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        byte[] originalContent = sourceReader.getFileContent().clone();
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle, "Chronicle should exist in the sample stash");
+
+        int baselineSetCount = chronicle.getNumSetItems();
+        int baselineFoundSets = chronicle.getFoundSetCount();
+
+        // Good file: all binary set slots are found.  Free one slot first.
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getSetGrailEntries();
+        int victimIndex = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (grail.get(i).isFound()) { victimIndex = i; break; }
+        }
+        assertTrue(victimIndex >= 0, "There must be at least one found set item in grail");
+        assertTrue(chronicle.markNotFound(D2Chronicle.Section.SET, victimIndex),
+                "Unmarking a found set item should succeed");
+
+        // Now find a not-found grail entry and mark it
+        grail = chronicle.getSetGrailEntries();
+        int targetIndex = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (!grail.get(i).isFound()) { targetIndex = i; break; }
+        }
+        assertTrue(targetIndex >= 0, "There must be at least one not-found set item in grail");
+        String targetName = grail.get(targetIndex).getItemName();
+        int targetAstxId = grail.get(targetIndex).getRawField6();
+        System.out.println("Marking set item as found: " + targetName + " (*ID=" + targetAstxId + ")");
+
+        assertTrue(chronicle.markFound(D2Chronicle.Section.SET, targetIndex),
+                "Marking a not-found set item should succeed after freeing a slot");
+        assertEquals(baselineSetCount, chronicle.getNumSetItems(),
+                "Set count must not change (slot reuse, not append)");
+        assertEquals(baselineFoundSets, chronicle.getFoundSetCount(),
+                "Found set count stays the same (one removed, one added)");
+
+        // Idempotency
+        assertFalse(chronicle.markFound(D2Chronicle.Section.SET, targetIndex),
+                "Marking an already-found set item should return false");
+
+        // Write and reload
+        File outFile = File.createTempFile("gomule-set-mark-found", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        assertEquals(originalContent.length, writtenBytes.length,
+                "Written file must be the same size (no count growth)");
+
+        // Verify chronicle header counts in binary
+        int[] writtenOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(writtenBytes.clone()));
+        int writtenChronicleStart = writtenOffsets[writtenOffsets.length - 1];
+        int writtenSetCount = (writtenBytes[writtenChronicleStart + 70] & 0xFF)
+                | ((writtenBytes[writtenChronicleStart + 71] & 0xFF) << 8);
+        assertEquals(baselineSetCount, writtenSetCount,
+                "Binary set count must not change");
+
+        // Reload and verify
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle reloadedChronicle = reloaded.getChronicle();
+        assertNotNull(reloadedChronicle);
+        assertEquals(baselineSetCount, reloadedChronicle.getNumSetItems());
+        assertEquals(baselineFoundSets, reloadedChronicle.getFoundSetCount());
+
+        // Verify the specific item is found
+        boolean itemFound = false;
+        for (D2Chronicle.ChronicleEntry e : reloadedChronicle.getSetEntries()) {
+            if (e.isFound() && e.getRawField6() == targetAstxId) {
+                itemFound = true;
+                break;
+            }
+        }
+        assertTrue(itemFound, targetName + " (*ID=" + targetAstxId + ") should be found in reloaded chronicle");
+    }
+
+    @Test
+    public void testMarkAndUnmarkUniqueRoundTrip() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        byte[] originalContent = sourceReader.getFileContent().clone();
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        int baselineCount = chronicle.getNumUniqueItems();
+        int baselineFound = chronicle.getFoundUniqueCount();
+
+        // Pick a found unique and unmark then remark it
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int targetIndex = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (grail.get(i).isFound()) { targetIndex = i; break; }
+        }
+        assertTrue(targetIndex >= 0);
+
+        // Unmark, then re-mark
+        chronicle.markNotFound(D2Chronicle.Section.UNIQUE, targetIndex);
+        assertEquals(baselineFound - 1, chronicle.getFoundUniqueCount());
+        chronicle.markFound(D2Chronicle.Section.UNIQUE, targetIndex);
+        assertEquals(baselineFound, chronicle.getFoundUniqueCount());
+        assertEquals(baselineCount, chronicle.getNumUniqueItems(),
+                "Count must not change during unmark+mark cycle");
+        assertTrue(chronicle.isModified());
+
+        // Write file — must be same size as original (slot reused)
+        File outFile = File.createTempFile("gomule-unique-roundtrip", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+        assertEquals(originalContent.length, writtenBytes.length,
+                "File size must not change after unmark+mark round trip");
+
+        // Reload and verify counts match baseline
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle reloadedChronicle = reloaded.getChronicle();
+        assertNotNull(reloadedChronicle);
+        assertEquals(baselineCount, reloadedChronicle.getNumUniqueItems());
+        assertEquals(baselineFound, reloadedChronicle.getFoundUniqueCount(),
+                "Found unique count should be restored after unmark+mark");
+    }
+
+    /**
+     * Produces a savefile for game testing by swapping one unique and one set
+     * entry.  Unmarks a found entry in each section to free a binary slot,
+     * then marks a previously-not-found grail entry into that slot.
+     * Output: savefiles/ModernSharedStashSoftCoreV2_unique_set_test.d2i
+     */
+    @Test
+    public void testProduceUniqueSetTestFile() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        byte[] originalContent = sourceReader.getFileContent().clone();
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        System.out.println("=== BASELINE ===");
+        System.out.println("Unique: " + chronicle.getFoundUniqueCount() + "/" + chronicle.getNumUniqueItems());
+        System.out.println("Set:    " + chronicle.getFoundSetCount() + "/" + chronicle.getNumSetItems());
+
+        // --- Unique: directly mark (inserts before sentinel, grows count) ---
+        List<D2Chronicle.ChronicleEntry> uniqueGrail = chronicle.getUniqueGrailEntries();
+        int uniqueIdx = -1;
+        for (int i = 0; i < uniqueGrail.size(); i++) {
+            if (!uniqueGrail.get(i).isFound()) { uniqueIdx = i; break; }
+        }
+        if (uniqueIdx >= 0) {
+            String name = uniqueGrail.get(uniqueIdx).getItemName();
+            int astxId = uniqueGrail.get(uniqueIdx).getRawField6();
+            assertTrue(chronicle.markFound(D2Chronicle.Section.UNIQUE, uniqueIdx));
+            System.out.println("Marked unique:   " + name + " (*ID=" + astxId + ")");
+        }
+
+        // --- Set: free a slot first (sets have no duplicates), then fill it ---
+        List<D2Chronicle.ChronicleEntry> setGrail = chronicle.getSetGrailEntries();
+        int setVictimIdx = -1;
+        for (int i = 0; i < setGrail.size(); i++) {
+            if (setGrail.get(i).isFound()) { setVictimIdx = i; break; }
+        }
+        if (setVictimIdx >= 0) {
+            String victimName = setGrail.get(setVictimIdx).getItemName();
+            chronicle.markNotFound(D2Chronicle.Section.SET, setVictimIdx);
+            System.out.println("Unmarked set:    " + victimName);
+        }
+        setGrail = chronicle.getSetGrailEntries();
+        int setIdx = -1;
+        for (int i = 0; i < setGrail.size(); i++) {
+            if (!setGrail.get(i).isFound()) { setIdx = i; break; }
+        }
+        if (setIdx >= 0) {
+            String name = setGrail.get(setIdx).getItemName();
+            int astxId = setGrail.get(setIdx).getRawField6();
+            assertTrue(chronicle.markFound(D2Chronicle.Section.SET, setIdx));
+            System.out.println("Marked set:      " + name + " (*ID=" + astxId + ")");
+        }
+
+        System.out.println("\n=== AFTER MARKING ===");
+        System.out.println("Unique: " + chronicle.getFoundUniqueCount() + "/" + chronicle.getNumUniqueItems());
+        System.out.println("Set:    " + chronicle.getFoundSetCount() + "/" + chronicle.getNumSetItems());
+
+        // Write output
+        File outFile = new File("../savefiles/ModernSharedStashSoftCoreV2_unique_set_test.d2i");
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] outBytes = Files.readAllBytes(outFile.toPath());
+
+        assertEquals(originalContent.length, outBytes.length,
+                "Output file must be same size (unique sentinel overwritten, not inserted)");
+
+        // Verify round-trip
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc);
+        System.out.println("\n=== RELOADED ===");
+        System.out.println("Unique: " + rc.getFoundUniqueCount() + "/" + rc.getNumUniqueItems());
+        System.out.println("Set:    " + rc.getFoundSetCount() + "/" + rc.getNumSetItems());
+        System.out.println("Output: " + outFile.getAbsolutePath() + " (" + outBytes.length + " bytes)");
+
+        // Dump binary counts for verification
+        int[] offsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(outBytes.clone()));
+        int chronStart = offsets[offsets.length - 1];
+        int setCount = (outBytes[chronStart + 70] & 0xFF) | ((outBytes[chronStart + 71] & 0xFF) << 8);
+        int uniqCount = (outBytes[chronStart + 72] & 0xFF) | ((outBytes[chronStart + 73] & 0xFF) << 8);
+        System.out.println("\nBinary counts: set=" + setCount + " unique=" + uniqCount);
+
+        System.out.println("\nDeploy to game folder for testing:");
+        System.out.println("  Copy-Item -Path \"" + outFile.getAbsolutePath()
+                + "\" -Destination \"$env:USERPROFILE\\Saved Games\\Diablo II Resurrected\\ModernSharedStashSoftCoreV2.d2i\" -Force");
+    }
+
+    /**
+     * Diagnostic: dump raw bytes for unique entries with known game timestamps.
+     * Compare to find the correct timestamp encoding.
+     */
+    @Test
+    public void testDiagnoseTimestampEncoding() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        // Known game timestamps from the user's manual record (good-entries.txt):
+        // Format: item name -> *ID, game date/time
+        // Andariel's Visage  *ID=345  03/16/2026 21:30
+        // Coif of Glory      *ID=8    03/03/2026 13:59
+        // Duskdeep           *ID=9    03/01/2026 00:14
+        // Howltusk           *ID=10   03/18/2026 18:02
+        // Undead Crown       *ID=12   02/26/2026 09:08
+        // Harlequin Crest    *ID=308  02/26/2026 23:48
+        // Veil of Steel      *ID=316  03/08/2026 21:20
+
+        // Map *ID to known game time description
+        Map<Integer, String> knownTimes = new LinkedHashMap<>();
+        knownTimes.put(345, "03/16/2026 21:30");
+        knownTimes.put(8,   "03/03/2026 13:59");
+        knownTimes.put(9,   "03/01/2026 00:14");
+        knownTimes.put(10,  "03/18/2026 18:02");
+        knownTimes.put(12,  "02/26/2026 09:08");
+        knownTimes.put(308, "02/26/2026 23:48");
+        knownTimes.put(316, "03/08/2026 21:20");
+
+        // Compute expected minutes-since-epoch for each known time
+        java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("MM/dd/yyyy HH:mm");
+        java.time.ZoneId utc = java.time.ZoneId.of("UTC");
+        System.out.println("=== EXPECTED MINUTES-SINCE-EPOCH (UTC) ===");
+        Map<Integer, Long> expectedMinutes = new LinkedHashMap<>();
+        for (Map.Entry<Integer, String> e : knownTimes.entrySet()) {
+            java.time.LocalDateTime ldt = java.time.LocalDateTime.parse(e.getValue(), fmt);
+            long epochMin = ldt.atZone(utc).toEpochSecond() / 60;
+            expectedMinutes.put(e.getKey(), epochMin);
+            System.out.printf("  *ID=%3d  %s  -> epochMin=%d (0x%08X)%n", e.getKey(), e.getValue(), epochMin, epochMin);
+        }
+
+        // Also try common US timezones
+        for (String tz : new String[]{"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"}) {
+            System.out.println("\n=== EXPECTED MINUTES-SINCE-EPOCH (" + tz + ") ===");
+            java.time.ZoneId zone = java.time.ZoneId.of(tz);
+            for (Map.Entry<Integer, String> e : knownTimes.entrySet()) {
+                java.time.LocalDateTime ldt = java.time.LocalDateTime.parse(e.getValue(), fmt);
+                long epochMin = ldt.atZone(zone).toEpochSecond() / 60;
+                System.out.printf("  *ID=%3d  %s  -> epochMin=%d (0x%08X)%n", e.getKey(), e.getValue(), epochMin, epochMin);
+            }
+        }
+
+        // Dump the raw bytes for each known entry
+        System.out.println("\n=== RAW BYTES FOR KNOWN ENTRIES ===");
+        List<D2Chronicle.ChronicleEntry> uniqueEntries = chronicle.getUniqueEntries();
+        for (D2Chronicle.ChronicleEntry entry : uniqueEntries) {
+            if (!entry.isFound()) continue;
+            int id = entry.getRawField6();
+            if (!knownTimes.containsKey(id)) continue;
+
+            byte[] raw = entry.getRawBytes();
+            System.out.printf("*ID=%3d (%s)%n", id, knownTimes.get(id));
+            System.out.printf("  Raw hex: %s%n", bytesToHex(raw));
+            System.out.printf("  Bytes:   [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d] [%d]%n",
+                    raw[0] & 0xFF, raw[1] & 0xFF, raw[2] & 0xFF, raw[3] & 0xFF, raw[4] & 0xFF,
+                    raw[5] & 0xFF, raw[6] & 0xFF, raw[7] & 0xFF, raw[8] & 0xFF, raw[9] & 0xFF);
+
+            // Try various u32 interpretations across different byte offsets
+            for (int off = 0; off <= 6; off++) {
+                long u32 = (raw[off] & 0xFFL) | ((raw[off+1] & 0xFFL) << 8)
+                        | ((raw[off+2] & 0xFFL) << 16) | ((raw[off+3] & 0xFFL) << 24);
+                java.time.Instant inst = java.time.Instant.ofEpochSecond(u32 * 60);
+                String dateStr = inst.atZone(utc).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+                System.out.printf("  u32LE@[%d..%d] = %d (0x%08X) -> %s (UTC, as minutes)%n", off, off+3, u32, u32, dateStr);
+            }
+
+            // Try big-endian u32 at each offset
+            for (int off = 0; off <= 6; off++) {
+                long u32be = ((raw[off] & 0xFFL) << 24) | ((raw[off+1] & 0xFFL) << 16)
+                        | ((raw[off+2] & 0xFFL) << 8) | (raw[off+3] & 0xFFL);
+                java.time.Instant inst = java.time.Instant.ofEpochSecond(u32be * 60);
+                String dateStr = inst.atZone(utc).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+                System.out.printf("  u32BE@[%d..%d] = %d (0x%08X) -> %s (UTC, as minutes)%n", off, off+3, u32be, u32be, dateStr);
+            }
+
+            // Try as seconds instead of minutes
+            for (int off = 0; off <= 6; off++) {
+                long u32 = (raw[off] & 0xFFL) | ((raw[off+1] & 0xFFL) << 8)
+                        | ((raw[off+2] & 0xFFL) << 16) | ((raw[off+3] & 0xFFL) << 24);
+                if (u32 > 1700000000L || u32 < 1000000000L) continue; // only plausible unix seconds range
+                java.time.Instant inst = java.time.Instant.ofEpochSecond(u32);
+                String dateStr = inst.atZone(utc).format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+                System.out.printf("  u32LE@[%d..%d] = %d -> %s (UTC, as SECONDS)%n", off, off+3, u32, dateStr);
+            }
+
+            System.out.println();
+        }
+    }
+
+    /**
+     * Reproducer: mark Arachnid Mesh as found, write, compare bytes.
+     * Diagnoses "join game failed" after saving.
+     */
+    @Test
+    public void testMarkArachnidMeshByteDiff() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalBytes = Files.readAllBytes(stashFile.toPath());
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        // Dump unique entry stats
+        List<D2Chronicle.ChronicleEntry> binaryUniques = chronicle.getUniqueEntries();
+        int foundCount = 0, emptyCount = 0;
+        System.out.println("=== UNIQUE BINARY ENTRIES (last 10) ===");
+        for (int i = 0; i < binaryUniques.size(); i++) {
+            D2Chronicle.ChronicleEntry e = binaryUniques.get(i);
+            if (e.isFound()) foundCount++; else emptyCount++;
+            if (i >= binaryUniques.size() - 10) {
+                byte[] raw = e.getRawBytes();
+                System.out.printf("  [%3d] found=%-5s field6=%-6d rawHex=%s%n",
+                        i, e.isFound(), e.getRawField6(),
+                        raw != null ? bytesToHex(raw) : "null");
+            }
+        }
+        System.out.println("Unique entries: " + binaryUniques.size()
+                + " found=" + foundCount + " empty=" + emptyCount);
+
+        // Check last set entry too
+        List<D2Chronicle.ChronicleEntry> binarySets = chronicle.getSetEntries();
+        if (!binarySets.isEmpty()) {
+            D2Chronicle.ChronicleEntry lastSet = binarySets.get(binarySets.size() - 1);
+            byte[] raw = lastSet.getRawBytes();
+            System.out.printf("=== LAST SET ENTRY [%d] ===\n  found=%-5s field6=%-6d (0x%04X) rawHex=%s%n",
+                    binarySets.size() - 1, lastSet.isFound(), lastSet.getRawField6() & 0xFFFF,
+                    lastSet.getRawField6() & 0xFFFF, raw != null ? bytesToHex(raw) : "null");
+        }
+
+        // Check what field6 values > 1000 exist (possible sentinel/marker entries)
+        System.out.println("=== UNUSUAL field6 values (>1000) in unique entries ===");
+        for (int i = 0; i < binaryUniques.size(); i++) {
+            D2Chronicle.ChronicleEntry e = binaryUniques.get(i);
+            if (e.isFound() && (e.getRawField6() & 0xFFFF) > 1000) {
+                byte[] raw = e.getRawBytes();
+                System.out.printf("  [%3d] field6=%-6d (0x%04X) rawHex=%s%n",
+                        i, e.getRawField6() & 0xFFFF, e.getRawField6() & 0xFFFF,
+                        raw != null ? bytesToHex(raw) : "null");
+            }
+        }
+
+        // Find Arachnid Mesh in unique grail list
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int arachnidIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            String name = grail.get(i).getItemName();
+            if (name != null && name.toLowerCase().contains("arachnid")) {
+                arachnidIdx = i;
+                System.out.println("Found Arachnid Mesh at grail index " + i
+                        + ", field6=" + grail.get(i).getRawField6()
+                        + ", found=" + grail.get(i).isFound());
+                break;
+            }
+        }
+        assertTrue(arachnidIdx >= 0, "Arachnid Mesh must be in grail list");
+
+        // Mark as found
+        boolean marked = chronicle.markFound(D2Chronicle.Section.UNIQUE, arachnidIdx);
+        System.out.println("markFound returned: " + marked);
+        System.out.println("isModified: " + chronicle.isModified());
+
+        // Write
+        File outFile = File.createTempFile("gomule-arachnid-", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalBytes, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalBytes).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        // Compare sizes
+        System.out.println("Original size: " + originalBytes.length);
+        System.out.println("Written size:  " + writtenBytes.length);
+
+        // Compare pane offsets
+        int[] origOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(originalBytes.clone()));
+        int[] writOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(writtenBytes.clone()));
+        System.out.println("Original pane offsets: " + Arrays.toString(origOffsets));
+        System.out.println("Written pane offsets:  " + Arrays.toString(writOffsets));
+
+        // Byte-by-byte diff
+        int minLen = Math.min(originalBytes.length, writtenBytes.length);
+        int diffCount = 0;
+        for (int i = 0; i < minLen; i++) {
+            if (originalBytes[i] != writtenBytes[i]) {
+                // Determine which pane this byte belongs to
+                String paneInfo = "";
+                for (int p = origOffsets.length - 1; p >= 0; p--) {
+                    if (i >= origOffsets[p]) {
+                        int relOffset = i - origOffsets[p];
+                        paneInfo = " (pane " + p + ", rel offset " + relOffset + ")";
+                        break;
+                    }
+                }
+                System.out.printf("DIFF @%d%s: orig=0x%02X writ=0x%02X%n",
+                        i, paneInfo, originalBytes[i] & 0xFF, writtenBytes[i] & 0xFF);
+                diffCount++;
+                if (diffCount > 100) {
+                    System.out.println("... (truncated)");
+                    break;
+                }
+            }
+        }
+        if (writtenBytes.length > minLen) {
+            System.out.println("Written file has " + (writtenBytes.length - minLen) + " extra bytes");
+        } else if (originalBytes.length > minLen) {
+            System.out.println("Original file has " + (originalBytes.length - minLen) + " extra bytes");
+        }
+        System.out.println("Total byte differences: " + diffCount);
+
+        // Also verify the written file can be re-read
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        assertNotNull(reloaded.getChronicle(), "Reloaded chronicle must not be null");
+    }
+
+    @Test
+    public void testMarkBlackbogsSharpByteDiff() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalBytes = Files.readAllBytes(stashFile.toPath());
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        // Show binary status
+        List<D2Chronicle.ChronicleEntry> binaryUniques = chronicle.getUniqueEntries();
+        int foundCount = 0, emptyCount = 0;
+        for (D2Chronicle.ChronicleEntry e : binaryUniques) {
+            if (e.isFound()) foundCount++; else emptyCount++;
+        }
+        System.out.println("BEFORE: unique binary entries=" + binaryUniques.size()
+                + " found=" + foundCount + " empty=" + emptyCount
+                + " numUniqueItems=" + chronicle.getNumUniqueItems());
+        // Show last 3 entries
+        for (int i = Math.max(0, binaryUniques.size() - 3); i < binaryUniques.size(); i++) {
+            D2Chronicle.ChronicleEntry e = binaryUniques.get(i);
+            System.out.printf("  [%3d] found=%-5s field6=%-6d (0x%04X) rawHex=%s%n",
+                    i, e.isFound(), e.getRawField6() & 0xFFFF, e.getRawField6() & 0xFFFF,
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Find Blackbog's Sharp in grail
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int blackbogIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            String name = grail.get(i).getItemName();
+            if (name != null && name.contains("Blackbog")) {
+                blackbogIdx = i;
+                System.out.println("Blackbog's Sharp at grail index " + i
+                        + ", *ID(field6)=" + grail.get(i).getRawField6()
+                        + ", found=" + grail.get(i).isFound());
+                break;
+            }
+        }
+        assertTrue(blackbogIdx >= 0, "Blackbog's Sharp must be in grail list");
+        assertFalse(grail.get(blackbogIdx).isFound(), "Blackbog's Sharp should not be found yet");
+
+        // Mark as found
+        boolean marked = chronicle.markFound(D2Chronicle.Section.UNIQUE, blackbogIdx);
+        assertTrue(marked, "markFound should return true");
+
+        // Show binary status after
+        binaryUniques = chronicle.getUniqueEntries();
+        foundCount = 0; emptyCount = 0;
+        for (D2Chronicle.ChronicleEntry e : binaryUniques) {
+            if (e.isFound()) foundCount++; else emptyCount++;
+        }
+        System.out.println("AFTER: unique binary entries=" + binaryUniques.size()
+                + " found=" + foundCount + " empty=" + emptyCount
+                + " numUniqueItems=" + chronicle.getNumUniqueItems());
+        for (int i = Math.max(0, binaryUniques.size() - 3); i < binaryUniques.size(); i++) {
+            D2Chronicle.ChronicleEntry e = binaryUniques.get(i);
+            System.out.printf("  [%3d] found=%-5s field6=%-6d (0x%04X) rawHex=%s%n",
+                    i, e.isFound(), e.getRawField6() & 0xFFFF, e.getRawField6() & 0xFFFF,
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Write
+        File outFile = File.createTempFile("gomule-blackbog-", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalBytes, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalBytes).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original size: " + originalBytes.length);
+        System.out.println("Written size:  " + writtenBytes.length);
+
+        // Byte-by-byte diff
+        int minLen = Math.min(originalBytes.length, writtenBytes.length);
+        int diffCount = 0;
+        int[] origOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(originalBytes.clone()));
+        for (int i = 0; i < minLen; i++) {
+            if (originalBytes[i] != writtenBytes[i]) {
+                String paneInfo = "";
+                for (int p = origOffsets.length - 1; p >= 0; p--) {
+                    if (i >= origOffsets[p]) {
+                        int relOffset = i - origOffsets[p];
+                        paneInfo = " (pane " + p + ", rel offset " + relOffset + ")";
+                        break;
+                    }
+                }
+                System.out.printf("DIFF @%d%s: orig=0x%02X writ=0x%02X%n",
+                        i, paneInfo, originalBytes[i] & 0xFF, writtenBytes[i] & 0xFF);
+                diffCount++;
+                if (diffCount > 50) { System.out.println("... (truncated)"); break; }
+            }
+        }
+        if (writtenBytes.length > minLen) {
+            System.out.println("Written file has " + (writtenBytes.length - minLen) + " extra bytes at end:");
+            for (int i = minLen; i < Math.min(writtenBytes.length, minLen + 20); i++) {
+                System.out.printf("  @%d: 0x%02X%n", i, writtenBytes[i] & 0xFF);
+            }
+        }
+        System.out.println("Total byte differences: " + diffCount);
+
+        // Re-read and verify
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        assertNotNull(reloaded.getChronicle(), "Reloaded chronicle must not be null");
+        System.out.println("Re-read: numUniqueItems=" + reloaded.getChronicle().getNumUniqueItems());
+    }
+
+    @Test
+    public void testMarkBlackbogsSharpOnUserFile() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalBytes = Files.readAllBytes(stashFile.toPath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+        System.out.printf("BEFORE: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+
+        // Find Blackbog's Sharp
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int blackbogIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            String name = grail.get(i).getItemName();
+            if (name != null && name.contains("Blackbog")) {
+                blackbogIdx = i;
+                System.out.println("Blackbog at grail[" + i + "] *ID=" + grail.get(i).getRawField6()
+                        + " found=" + grail.get(i).isFound());
+                break;
+            }
+        }
+        assertTrue(blackbogIdx >= 0);
+
+        // Mark as found
+        List<D2Chronicle.ChronicleEntry> setBefore = chronicle.getSetEntries();
+        int setSentinelBefore = setBefore.get(setBefore.size() - 1).getRawField6();
+        System.out.println("Set sentinel BEFORE marking: field6=" + setSentinelBefore);
+
+        chronicle.markFound(D2Chronicle.Section.UNIQUE, blackbogIdx);
+        System.out.printf("AFTER: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+
+        // Verify set sentinel was relocated (if it was 170)
+        List<D2Chronicle.ChronicleEntry> setAfter = chronicle.getSetEntries();
+        int setSentinelAfter = setAfter.get(setAfter.size() - 1).getRawField6();
+        System.out.println("Set sentinel AFTER marking: field6=" + setSentinelAfter);
+        if (setSentinelBefore == 170) {
+            assertNotEquals(170, setSentinelAfter,
+                    "Set sentinel must be relocated away from 170 (Blackbog's *ID)");
+        }
+
+        // Show new entry and sentinel area
+        List<D2Chronicle.ChronicleEntry> binaryUniques = chronicle.getUniqueEntries();
+        System.out.println("Unique entries size: " + binaryUniques.size());
+        for (int i = Math.max(0, binaryUniques.size() - 3); i < binaryUniques.size(); i++) {
+            D2Chronicle.ChronicleEntry e = binaryUniques.get(i);
+            System.out.printf("  [%3d] found=%-5s field6=%-6d (0x%04X) raw=%s%n",
+                    i, e.isFound(), e.getRawField6() & 0xFFFF, e.getRawField6() & 0xFFFF,
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Write
+        File outFile = File.createTempFile("gomule-bb-user-", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalBytes, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalBytes).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original: " + originalBytes.length + " Written: " + writtenBytes.length);
+
+        // Verify can be fully re-read
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc);
+        System.out.printf("RELOADED: set=%d uniq=%d rw=%d%n",
+                rc.getNumSetItems(), rc.getNumUniqueItems(), rc.getNumRunewords());
+
+        // Verify Blackbog is now found
+        List<D2Chronicle.ChronicleEntry> reloadedGrail = rc.getUniqueGrailEntries();
+        D2Chronicle.ChronicleEntry bbEntry = reloadedGrail.get(blackbogIdx);
+        assertTrue(bbEntry.isFound(), "Blackbog should be found after marking");
+        assertEquals(170, bbEntry.getRawField6(), "Blackbog *ID should be 170");
+
+        // Verify sentinel is still the last entry and not valid
+        List<D2Chronicle.ChronicleEntry> reloadedBinary = rc.getUniqueEntries();
+        D2Chronicle.ChronicleEntry lastEntry = reloadedBinary.get(reloadedBinary.size() - 1);
+        System.out.printf("Last entry: field6=%d (0x%04X) found=%s raw=%s%n",
+                lastEntry.getRawField6() & 0xFFFF, lastEntry.getRawField6() & 0xFFFF,
+                lastEntry.isFound(),
+                lastEntry.getRawBytes() != null ? bytesToHex(lastEntry.getRawBytes()) : "null");
+
+        // Byte diff - only chronicle pane changes
+        int[] origOffsets = D2SharedStashReader.getStashHeaderOffsets(ROW, new D2BitReader(originalBytes.clone()));
+        int chroniclePaneStart = origOffsets[origOffsets.length - 1];
+        int minLen = Math.min(originalBytes.length, writtenBytes.length);
+        int diffInNonChronicle = 0;
+        for (int i = 0; i < Math.min(chroniclePaneStart, minLen); i++) {
+            if (originalBytes[i] != writtenBytes[i]) diffInNonChronicle++;
+        }
+        System.out.println("Diffs before chronicle pane: " + diffInNonChronicle);
+        assertEquals(0, diffInNonChronicle, "Only chronicle pane should change");
+
+        // Check written file for false 55AA55AA patterns
+        byte[] marker = {0x55, (byte) 0xAA, 0x55, (byte) 0xAA};
+        int markerCount = 0;
+        for (int i = 0; i < writtenBytes.length - 3; i++) {
+            if (writtenBytes[i] == marker[0] && writtenBytes[i + 1] == marker[1]
+                    && writtenBytes[i + 2] == marker[2] && writtenBytes[i + 3] == marker[3]) {
+                markerCount++;
+            }
+        }
+        System.out.println("55AA55AA markers in written file: " + markerCount);
+        assertEquals(7, markerCount, "Should still have exactly 7 pane markers");
+    }
+
+    @Test
+    public void testMarkBlackbogsRelocatesSetSentinel() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalBytes = Files.readAllBytes(stashFile.toPath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        // Confirm set sentinel is currently field6=170 (the collision value)
+        List<D2Chronicle.ChronicleEntry> setSentinelBefore = chronicle.getSetEntries();
+        D2Chronicle.ChronicleEntry lastSetBefore = setSentinelBefore.get(setSentinelBefore.size() - 1);
+        assertEquals(170, lastSetBefore.getRawField6(), "Set sentinel should initially be 170");
+        System.out.println("Set sentinel BEFORE: field6=" + lastSetBefore.getRawField6());
+
+        // Find and mark Blackbog's Sharp (*ID=170)
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getUniqueGrailEntries();
+        int blackbogIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if (grail.get(i).getItemName() != null && grail.get(i).getItemName().contains("Blackbog")) {
+                blackbogIdx = i;
+                break;
+            }
+        }
+        assertTrue(blackbogIdx >= 0, "Blackbog's Sharp must exist in grail");
+        assertEquals(170, grail.get(blackbogIdx).getRawField6(), "Blackbog's *ID must be 170");
+
+        boolean marked = chronicle.markFound(D2Chronicle.Section.UNIQUE, blackbogIdx);
+        assertTrue(marked, "markFound should succeed");
+
+        // Verify set sentinel was relocated (no longer 170)
+        List<D2Chronicle.ChronicleEntry> setEntriesAfter = chronicle.getSetEntries();
+        D2Chronicle.ChronicleEntry lastSetAfter = setEntriesAfter.get(setEntriesAfter.size() - 1);
+        assertNotEquals(170, lastSetAfter.getRawField6(),
+                "Set sentinel must be relocated away from 170 to avoid collision");
+        System.out.println("Set sentinel AFTER: field6=" + lastSetAfter.getRawField6());
+
+        // Sentinel must still be a non-valid set *ID (above 139)
+        assertTrue(lastSetAfter.getRawField6() > 139,
+                "Relocated sentinel must still be above max valid set *ID");
+
+        // Verify Blackbog's is now found in unique section
+        boolean blackbogFound = false;
+        for (D2Chronicle.ChronicleEntry e : chronicle.getUniqueEntries()) {
+            if (e.isFound() && e.getRawField6() == 170) {
+                blackbogFound = true;
+                break;
+            }
+        }
+        assertTrue(blackbogFound, "Blackbog should be found in unique binary entries");
+
+        // Verify no cross-section field6=170 collision between set sentinel and unique entries
+        int setSentinelField6 = lastSetAfter.getRawField6();
+        for (D2Chronicle.ChronicleEntry e : chronicle.getUniqueEntries()) {
+            if (e.isFound()) {
+                assertNotEquals(setSentinelField6, e.getRawField6(),
+                        "Relocated set sentinel must not collide with any unique entry");
+            }
+        }
+
+        // Write and re-read
+        File outFile = File.createTempFile("gomule-bb-sentinel-", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalBytes, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalBytes).write(writableStash);
+
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        assertNotNull(reloaded.getChronicle());
+
+        // Verify Blackbog's is still found after round-trip
+        List<D2Chronicle.ChronicleEntry> reloadedGrail = reloaded.getChronicle().getUniqueGrailEntries();
+        assertTrue(reloadedGrail.get(blackbogIdx).isFound(),
+                "Blackbog should still be found after write/reload");
+        System.out.println("Round-trip successful. Blackbog found=" + reloadedGrail.get(blackbogIdx).isFound());
+    }
+
+    @Test
+    public void testMarkArcannaSignAsFound_doesNotCorruptFile() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_good.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        D2BitReader sourceReader = new D2BitReader(stashFile.getAbsolutePath());
+        byte[] originalContent = sourceReader.getFileContent().clone();
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(), sourceReader);
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle, "Chronicle should exist");
+
+        int origSetCount = chronicle.getNumSetItems();
+        int origUniqCount = chronicle.getNumUniqueItems();
+        int origRwCount = chronicle.getNumRunewords();
+        System.out.println("Original counts: set=" + origSetCount + " uniq=" + origUniqCount + " rw=" + origRwCount);
+        System.out.println("Original found: set=" + chronicle.getFoundSetCount()
+                + " uniq=" + chronicle.getFoundUniqueCount() + " rw=" + chronicle.getFoundRunewordCount());
+
+        // Count eligible set items in txt file
+        int eligibleCount = 0;
+        for (int i = 0; i < D2TxtFile.SETITEMS.getRowSize(); i++) {
+            D2TxtFileItemProperties row = D2TxtFile.SETITEMS.getRow(i);
+            String idStr = row.get("*ID");
+            if (idStr == null || idStr.isEmpty()) continue;
+            String code = row.get("item");
+            if (code == null || code.isEmpty()) continue;
+            if (!"1".equals(row.get("spawnable"))) continue;
+            if ("1".equals(row.get("disableChronicle"))) continue;
+            eligibleCount++;
+        }
+        System.out.println("Eligible set items in txt: " + eligibleCount);
+
+        // Check which *IDs are in binary entries
+        java.util.Set<Integer> binaryField6s = new java.util.TreeSet<>();
+        for (D2Chronicle.ChronicleEntry e : chronicle.getSetEntries()) {
+            if (e.isFound()) binaryField6s.add(e.getRawField6());
+        }
+        System.out.println("Distinct field6 in binary: " + binaryField6s.size());
+        System.out.println("Field6 values: " + binaryField6s);
+
+        // Check if 58 is present
+        System.out.println("Field6=58 present in binary: " + binaryField6s.contains(58));
+
+        // Print entries around index 58
+        for (int i = Math.max(0, 56); i < Math.min(chronicle.getSetEntries().size(), 62); i++) {
+            D2Chronicle.ChronicleEntry e = chronicle.getSetEntries().get(i);
+            System.out.printf("  Entry[%d] found=%b field0=0x%04X ts=%d field6=%d(0x%04X) field8=0x%04X%n",
+                    i, e.isFound(), e.getRawField0(), e.getRawTimestamp(),
+                    e.getRawField6(), e.getRawField6(), e.getRawField8());
+        }
+        // Print last 3 entries
+        for (int i = Math.max(0, chronicle.getSetEntries().size() - 3); i < chronicle.getSetEntries().size(); i++) {
+            D2Chronicle.ChronicleEntry e = chronicle.getSetEntries().get(i);
+            System.out.printf("  Entry[%d] found=%b field0=0x%04X ts=%d field6=%d(0x%04X) field8=0x%04X%n",
+                    i, e.isFound(), e.getRawField0(), e.getRawTimestamp(),
+                    e.getRawField6(), e.getRawField6(), e.getRawField8());
+        }
+
+        // Find Arcanna's Sign in the grail
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getSetGrailEntries();
+        int arcannaIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if ("Arcanna's Sign".equals(grail.get(i).getItemName())) {
+                arcannaIdx = i;
+                break;
+            }
+        }
+        assertTrue(arcannaIdx >= 0, "Arcanna's Sign should be in set grail");
+        D2Chronicle.ChronicleEntry arcannaGrail = grail.get(arcannaIdx);
+        System.out.println("Arcanna's Sign: grailIdx=" + arcannaIdx + " *ID=" + arcannaGrail.getRawField6()
+                + " found=" + arcannaGrail.isFound());
+
+        // If already found, unmark first
+        if (arcannaGrail.isFound()) {
+            System.out.println("Arcanna's Sign already found, unmarking first...");
+            assertTrue(chronicle.markNotFound(D2Chronicle.Section.SET, arcannaIdx));
+            System.out.println("After unmark: setCount=" + chronicle.getNumSetItems()
+                    + " foundSets=" + chronicle.getFoundSetCount());
+            System.out.println("=== Set binary entries after unmark ===");
+            for (int i = 0; i < chronicle.getSetEntries().size(); i++) {
+                D2Chronicle.ChronicleEntry e = chronicle.getSetEntries().get(i);
+                System.out.printf("  [%d] found=%b field6=0x%04X(%d) rawBytes=%s%n",
+                        i, e.isFound(), e.getRawField6(), e.getRawField6(),
+                        e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+            }
+        }
+
+        // Now mark Arcanna's Sign as found
+        System.out.println("Marking Arcanna's Sign as found...");
+        assertTrue(chronicle.markFound(D2Chronicle.Section.SET, arcannaIdx),
+                "Marking Arcanna's Sign should succeed");
+
+        System.out.println("After mark: setCount=" + chronicle.getNumSetItems()
+                + " uniqCount=" + chronicle.getNumUniqueItems()
+                + " rwCount=" + chronicle.getNumRunewords()
+                + " foundSets=" + chronicle.getFoundSetCount());
+
+        System.out.println("=== Set binary entries after mark ===");
+        for (int i = 0; i < chronicle.getSetEntries().size(); i++) {
+            D2Chronicle.ChronicleEntry e = chronicle.getSetEntries().get(i);
+            System.out.printf("  [%d] found=%b field6=0x%04X(%d) rawBytes=%s%n",
+                    i, e.isFound(), e.getRawField6(), e.getRawField6(),
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Write to temp file
+        File outFile = File.createTempFile("gomule-arcanna-test", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original file size: " + originalContent.length);
+        System.out.println("Written file size: " + writtenBytes.length);
+
+        // Find byte differences
+        int minLen = Math.min(originalContent.length, writtenBytes.length);
+        int diffCount = 0;
+        for (int i = 0; i < minLen; i++) {
+            if (originalContent[i] != writtenBytes[i]) {
+                if (diffCount < 50) {
+                    System.out.printf("  Diff at offset 0x%04X: orig=0x%02X new=0x%02X%n",
+                            i, originalContent[i] & 0xFF, writtenBytes[i] & 0xFF);
+                }
+                diffCount++;
+            }
+        }
+        if (writtenBytes.length > originalContent.length) {
+            System.out.println("  Extra bytes at end: " + (writtenBytes.length - originalContent.length));
+        }
+        System.out.println("Total byte differences: " + diffCount);
+
+        // Try to reload
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc, "Reloaded chronicle should not be null");
+        System.out.println("Reloaded counts: set=" + rc.getNumSetItems()
+                + " uniq=" + rc.getNumUniqueItems() + " rw=" + rc.getNumRunewords());
+        System.out.println("Reloaded found: set=" + rc.getFoundSetCount()
+                + " uniq=" + rc.getFoundUniqueCount() + " rw=" + rc.getFoundRunewordCount());
+
+        // Also check unique section for sentinels
+        System.out.println("=== Unique entries analysis ===");
+        int maxUniqId = 0;
+        for (int i = 0; i < D2TxtFile.UNIQUES.getRowSize(); i++) {
+            String idStr = D2TxtFile.UNIQUES.getRow(i).get("*ID");
+            if (idStr != null && !idStr.isEmpty()) {
+                try { maxUniqId = Math.max(maxUniqId, Integer.parseInt(idStr)); } catch (NumberFormatException ignored) {}
+            }
+        }
+        System.out.println("Max unique *ID in txt: " + maxUniqId);
+        // Read from ORIGINAL stash (not modified)
+        D2SharedStash origStash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle origChronicle = origStash.getChronicle();
+        java.util.Set<Integer> uniqField6s = new java.util.TreeSet<>();
+        for (D2Chronicle.ChronicleEntry e : origChronicle.getUniqueEntries()) {
+            if (e.isFound()) uniqField6s.add(e.getRawField6());
+        }
+        // Find any field6 > maxUniqId
+        for (int f6 : uniqField6s) {
+            if (f6 > maxUniqId) {
+                System.out.println("Unique sentinel candidate: field6=" + f6);
+            }
+        }
+        D2Chronicle.ChronicleEntry lastUniq = origChronicle.getUniqueEntries()
+                .get(origChronicle.getUniqueEntries().size() - 1);
+        System.out.println("Last unique entry: field6=" + lastUniq.getRawField6()
+                + " found=" + lastUniq.isFound());
+    }
+
+    @Test
+    public void testMarkArcannaSignOnUserFile_doesNotCorruptFile() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalBytes = Files.readAllBytes(stashFile.toPath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        System.out.println("=== USER FILE STATE ===");
+        System.out.println("File size: " + originalBytes.length);
+        System.out.printf("Counts: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+        System.out.printf("Found: set=%d uniq=%d rw=%d%n",
+                chronicle.getFoundSetCount(), chronicle.getFoundUniqueCount(), chronicle.getFoundRunewordCount());
+
+        // Show set entries summary
+        List<D2Chronicle.ChronicleEntry> setEntries = chronicle.getSetEntries();
+        int setFound = 0, setEmpty = 0;
+        for (D2Chronicle.ChronicleEntry e : setEntries) {
+            if (e.isFound()) setFound++; else setEmpty++;
+        }
+        System.out.println("Set binary: total=" + setEntries.size() + " found=" + setFound + " empty=" + setEmpty);
+
+        // Check for GoMule-fabricated entries (field0=544=BAAL_FIELD0 from old code)
+        System.out.println("=== SET entries with field0=544 (old GoMule code) ===");
+        for (int i = 0; i < setEntries.size(); i++) {
+            D2Chronicle.ChronicleEntry e = setEntries.get(i);
+            if (e.getRawField0() == 544) {
+                System.out.printf("  [%d] field0=%d field6=%d raw=%s%n", i, e.getRawField0(), e.getRawField6(),
+                        e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+            }
+        }
+        // Also dump ALL unique field0 values to check for field0=544
+        System.out.println("=== UNIQUE entries with field0=544 (old GoMule code) ===");
+        for (int i = 0; i < chronicle.getUniqueEntries().size(); i++) {
+            D2Chronicle.ChronicleEntry e = chronicle.getUniqueEntries().get(i);
+            if (e.getRawField0() == 544) {
+                System.out.printf("  [%d] field0=%d field6=%d raw=%s%n", i, e.getRawField0(), e.getRawField6(),
+                        e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+            }
+        }
+        // Show distinct field0 values in set entries
+        java.util.Set<Integer> distinctField0 = new java.util.TreeSet<>();
+        for (D2Chronicle.ChronicleEntry e : setEntries) distinctField0.add(e.getRawField0());
+        System.out.println("Set distinct field0 values: " + distinctField0);
+        // Check for DUPLICATE field0 values (GoMule donor reuse)
+        java.util.Map<Integer, java.util.List<Integer>> field0ToIndices = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < setEntries.size(); i++) {
+            int f0 = setEntries.get(i).getRawField0();
+            field0ToIndices.computeIfAbsent(f0, k -> new java.util.ArrayList<>()).add(i);
+        }
+        for (java.util.Map.Entry<Integer, java.util.List<Integer>> entry : field0ToIndices.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                System.out.println("  DUPLICATE field0=" + entry.getKey() + " at set indices: " + entry.getValue());
+            }
+        }
+        // Also check unique section for duplicate field0
+        java.util.Map<Integer, java.util.List<Integer>> uniqField0 = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < chronicle.getUniqueEntries().size(); i++) {
+            int f0 = chronicle.getUniqueEntries().get(i).getRawField0();
+            uniqField0.computeIfAbsent(f0, k -> new java.util.ArrayList<>()).add(i);
+        }
+        for (java.util.Map.Entry<Integer, java.util.List<Integer>> entry : uniqField0.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                System.out.println("  DUPLICATE field0=" + entry.getKey() + " at unique indices: " + entry.getValue());
+            }
+        }
+        // Check for entries sharing FULL bytes[0-5] prefix
+        System.out.println("=== Entries sharing full bytes[0-5] prefix ===");
+        java.util.Map<String, java.util.List<Integer>> prefixToIndices = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < setEntries.size(); i++) {
+            byte[] raw = setEntries.get(i).getRawBytes();
+            if (raw != null && raw.length >= 6) {
+                String prefix = String.format("%02X%02X%02X%02X%02X%02X",
+                        raw[0]&0xFF, raw[1]&0xFF, raw[2]&0xFF, raw[3]&0xFF, raw[4]&0xFF, raw[5]&0xFF);
+                prefixToIndices.computeIfAbsent(prefix, k -> new java.util.ArrayList<>()).add(i);
+            }
+        }
+        for (java.util.Map.Entry<String, java.util.List<Integer>> entry : prefixToIndices.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                System.out.print("  PREFIX " + entry.getKey() + " at indices: " + entry.getValue() + " -> field6: [");
+                for (int idx = 0; idx < entry.getValue().size(); idx++) {
+                    if (idx > 0) System.out.print(", ");
+                    System.out.print(setEntries.get(entry.getValue().get(idx)).getRawField6());
+                }
+                System.out.println("]");
+            }
+        }
+
+        // Dump ALL set field6 values to find duplicates and identify sentinel
+        System.out.println("=== ALL set field6 values ===");
+        java.util.Map<Integer, java.util.List<Integer>> field6ToIndices = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < setEntries.size(); i++) {
+            int f6 = setEntries.get(i).getRawField6();
+            field6ToIndices.computeIfAbsent(f6, k -> new java.util.ArrayList<>()).add(i);
+        }
+        // Print ALL field6 values
+        StringBuilder allF6 = new StringBuilder();
+        for (int i = 0; i < setEntries.size(); i++) {
+            if (i > 0) allF6.append(", ");
+            allF6.append(setEntries.get(i).getRawField6());
+        }
+        System.out.println("  field6 values: [" + allF6 + "]");
+        // Print duplicates
+        for (java.util.Map.Entry<Integer, java.util.List<Integer>> entry : field6ToIndices.entrySet()) {
+            if (entry.getValue().size() > 1) {
+                System.out.println("  DUPLICATE field6=" + entry.getKey() + " at indices: " + entry.getValue());
+            }
+        }
+        // Print field6 values NOT in eligible set *IDs
+        java.util.Set<Integer> eligibleSetIds = new java.util.HashSet<>();
+        for (int i = 0; i < randall.d2files.D2TxtFile.SETITEMS.getRowSize(); i++) {
+            randall.d2files.D2TxtFileItemProperties row = randall.d2files.D2TxtFile.SETITEMS.getRow(i);
+            String idStr = row.get("*ID");
+            String spawnable = row.get("spawnable");
+            String disable = row.get("disableChronicle");
+            if (idStr != null && !idStr.isEmpty() && "1".equals(spawnable) && !"1".equals(disable)) {
+                try { eligibleSetIds.add(Integer.parseInt(idStr)); } catch (NumberFormatException ignored) {}
+            }
+        }
+        System.out.println("  Eligible set *IDs count: " + eligibleSetIds.size());
+        for (int i = 0; i < setEntries.size(); i++) {
+            int f6 = setEntries.get(i).getRawField6();
+            if (!eligibleSetIds.contains(f6)) {
+                System.out.printf("  NON-ELIGIBLE entry[%d] field6=%d(0x%04X) raw=%s%n",
+                        i, f6, f6, setEntries.get(i).getRawBytes() != null ? bytesToHex(setEntries.get(i).getRawBytes()) : "null");
+            }
+        }
+
+        // Show last 5 set entries
+        System.out.println("=== Last 5 set entries ===");
+        for (int i = Math.max(0, setEntries.size() - 5); i < setEntries.size(); i++) {
+            D2Chronicle.ChronicleEntry e = setEntries.get(i);
+            System.out.printf("  [%d] found=%b field6=%d(0x%04X) raw=%s%n",
+                    i, e.isFound(), e.getRawField6(), e.getRawField6(),
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Show unique entries summary
+        List<D2Chronicle.ChronicleEntry> uniqEntries = chronicle.getUniqueEntries();
+        int uniqFound = 0, uniqEmpty = 0;
+        for (D2Chronicle.ChronicleEntry e : uniqEntries) {
+            if (e.isFound()) uniqFound++; else uniqEmpty++;
+        }
+        System.out.println("Unique binary: total=" + uniqEntries.size() + " found=" + uniqFound + " empty=" + uniqEmpty);
+        System.out.println("=== Last 5 unique entries ===");
+        for (int i = Math.max(0, uniqEntries.size() - 5); i < uniqEntries.size(); i++) {
+            D2Chronicle.ChronicleEntry e = uniqEntries.get(i);
+            System.out.printf("  [%d] found=%b field6=%d(0x%04X) raw=%s%n",
+                    i, e.isFound(), e.getRawField6(), e.getRawField6(),
+                    e.getRawBytes() != null ? bytesToHex(e.getRawBytes()) : "null");
+        }
+
+        // Find Arcanna's Sign
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getSetGrailEntries();
+        int arcannaIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if ("Arcanna's Sign".equals(grail.get(i).getItemName())) {
+                arcannaIdx = i;
+                break;
+            }
+        }
+        assertTrue(arcannaIdx >= 0, "Arcanna's Sign should be in grail");
+        System.out.println("Arcanna's Sign: grailIdx=" + arcannaIdx
+                + " *ID=" + grail.get(arcannaIdx).getRawField6()
+                + " found=" + grail.get(arcannaIdx).isFound());
+
+        // Debug: compare entry[0] and entry[last] raw byte prefixes
+        D2Chronicle.ChronicleEntry entry0 = chronicle.getSetEntries().get(0);
+        D2Chronicle.ChronicleEntry entryLast = chronicle.getSetEntries().get(chronicle.getSetEntries().size() - 1);
+        System.out.println("Entry[0] raw: " + (entry0.getRawBytes() != null ? bytesToHex(entry0.getRawBytes()) : "null"));
+        System.out.println("Entry[last] raw: " + (entryLast.getRawBytes() != null ? bytesToHex(entryLast.getRawBytes()) : "null"));
+        // Debug: find how many entries share the same bytes[0-5] prefix as entry[110]
+        byte[] lastPrefix = entryLast.getRawBytes();
+        System.out.println("Scanning for entries sharing last entry's prefix...");
+        int prefixMatches = 0;
+        for (int i = 0; i < chronicle.getSetEntries().size() - 1; i++) {
+            byte[] raw = chronicle.getSetEntries().get(i).getRawBytes();
+            if (raw != null && lastPrefix != null && raw.length >= 6 && lastPrefix.length >= 6) {
+                boolean match = true;
+                for (int b = 0; b < 6; b++) {
+                    if (raw[b] != lastPrefix[b]) { match = false; break; }
+                }
+                if (match) {
+                    System.out.println("  PREFIX MATCH at index " + i + " raw=" + bytesToHex(raw));
+                    prefixMatches++;
+                }
+            }
+        }
+        System.out.println("  Total prefix matches (excluding last): " + prefixMatches);
+
+        // Diagnostic: replicate findSentinelIndex logic for set section
+        System.out.println("=== Sentinel detection diagnostic (set section) ===");
+        java.util.Set<Integer> eligibleSetIdsLocal = new java.util.HashSet<>();
+        for (int i = 0; i < randall.d2files.D2TxtFile.SETITEMS.getRowSize(); i++) {
+            randall.d2files.D2TxtFileItemProperties row = randall.d2files.D2TxtFile.SETITEMS.getRow(i);
+            String idStr2 = row.get("*ID");
+            if (idStr2 == null || idStr2.isEmpty()) continue;
+            String code2 = row.get("item");
+            if (code2 == null || code2.isEmpty()) continue;
+            if (!"1".equals(row.get("spawnable"))) continue;
+            if ("1".equals(row.get("disableChronicle"))) continue;
+            try { eligibleSetIdsLocal.add(Integer.parseInt(idStr2)); } catch (NumberFormatException ignored) {}
+        }
+        System.out.println("  Eligible set IDs count: " + eligibleSetIdsLocal.size());
+        System.out.println("  Is 0 in eligible? " + eligibleSetIdsLocal.contains(0));
+        System.out.println("  Is 58 in eligible? " + eligibleSetIdsLocal.contains(58));
+        // Find sentinel
+        int diagSentinelIdx = -1;
+        for (int i = chronicle.getSetEntries().size() - 1; i >= 0; i--) {
+            D2Chronicle.ChronicleEntry e = chronicle.getSetEntries().get(i);
+            if (e.isFound() && !eligibleSetIdsLocal.contains(e.getRawField6())) {
+                System.out.println("  Sentinel found at index " + i + " field6=" + e.getRawField6());
+                diagSentinelIdx = i;
+                break;
+            }
+        }
+        if (diagSentinelIdx < 0) {
+            System.out.println("  NO sentinel found!");
+        }
+
+        // Also check unique section for sentinels
+        System.out.println("=== Sentinel detection diagnostic (unique section) ===");
+        java.util.Set<Integer> eligibleUniqIds = new java.util.HashSet<>();
+        for (int i = 0; i < randall.d2files.D2TxtFile.UNIQUES.getRowSize(); i++) {
+            randall.d2files.D2TxtFileItemProperties row = randall.d2files.D2TxtFile.UNIQUES.getRow(i);
+            String idStr2 = row.get("*ID");
+            if (idStr2 == null || idStr2.isEmpty()) continue;
+            String code2 = row.get("code");
+            if (code2 == null || code2.isEmpty()) continue;
+            if (!"1".equals(row.get("spawnable"))) continue;
+            if ("1".equals(row.get("disableChronicle"))) continue;
+            try { eligibleUniqIds.add(Integer.parseInt(idStr2)); } catch (NumberFormatException ignored) {}
+        }
+        System.out.println("  Eligible unique IDs count: " + eligibleUniqIds.size());
+        int uniqSentCount = 0;
+        for (int i = chronicle.getUniqueEntries().size() - 1; i >= 0; i--) {
+            D2Chronicle.ChronicleEntry e = chronicle.getUniqueEntries().get(i);
+            if (e.isFound() && !eligibleUniqIds.contains(e.getRawField6())) {
+                System.out.println("  Unique sentinel at index " + i + " field6=" + e.getRawField6());
+                uniqSentCount++;
+                if (uniqSentCount >= 5) { System.out.println("  ... more"); break; }
+            }
+        }
+        if (uniqSentCount == 0) System.out.println("  No unique sentinels found");
+
+        // Check if Arcanna's *ID (58) is in ANY set binary entry
+        boolean has58 = false;
+        for (D2Chronicle.ChronicleEntry e : chronicle.getSetEntries()) {
+            if (e.isFound() && e.getRawField6() == 58) { has58 = true; break; }
+        }
+        System.out.println("field6=58 already in set entries? " + has58);
+        // Check if 58 is in any unique entry
+        boolean uniq58 = false;
+        for (D2Chronicle.ChronicleEntry e : chronicle.getUniqueEntries()) {
+            if (e.isFound() && e.getRawField6() == 58) { uniq58 = true; break; }
+        }
+        System.out.println("field6=58 in unique entries? " + uniq58);
+
+        // Mark as found — should succeed by growing the set section.
+        // D2R itself grows sections as items are discovered, so this is safe.
+        // The set section has no sentinel — entry is appended at the end.
+        int origSetCount = chronicle.getNumSetItems();
+        int origUniqCount = chronicle.getNumUniqueItems();
+        boolean changed = chronicle.markFound(D2Chronicle.Section.SET, arcannaIdx);
+        assertTrue(changed, "markFound should succeed by growing set section");
+        System.out.println("markFound returned: " + changed);
+
+        // Chronicle should be modified.
+        assertTrue(chronicle.isModified(), "Chronicle should be modified after successful mark");
+
+        // Set count increases by 1 (growth), unique stays the same.
+        assertEquals(origSetCount + 1, chronicle.getNumSetItems(),
+                "Set count should increase by 1 (growth)");
+        assertEquals(origUniqCount, chronicle.getNumUniqueItems(),
+                "Unique count should stay the same");
+
+        // Write round-trip and verify file size unchanged
+        byte[] originalContent = Files.readAllBytes(stashFile.toPath());
+        File outFile = File.createTempFile("gomule-sentinel-overwrite-test", ".d2i");
+        outFile.deleteOnExit();
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] writtenBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original file size: " + originalContent.length);
+        System.out.println("Written file size: " + writtenBytes.length);
+        assertEquals(originalContent.length + 10, writtenBytes.length,
+                "File size should grow by 10 bytes (one new set entry)");
+
+        // Verify the written file can be read back
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc, "Reloaded chronicle should not be null");
+        assertEquals(chronicle.getNumSetItems(), rc.getNumSetItems(),
+                "Set count should match after round-trip");
+        assertEquals(chronicle.getNumUniqueItems(), rc.getNumUniqueItems(),
+                "Unique count should match after round-trip");
+
+        // Verify Arcanna's Sign is found in the reloaded chronicle
+        boolean arcannaFound = false;
+        for (D2Chronicle.ChronicleEntry e : rc.getSetEntries()) {
+            if (e.isFound() && e.getRawField6() == chronicle.getSetGrailEntries().get(arcannaIdx).getRawField6()) {
+                arcannaFound = true;
+                break;
+            }
+        }
+        assertTrue(arcannaFound, "Arcanna's Sign should be found after round-trip");
+    }
+
+    @Test
+    public void testProduceSetGrowthFileForGameTesting() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalContent = Files.readAllBytes(stashFile.toPath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        System.out.println("=== BASELINE (user file) ===");
+        System.out.printf("Counts: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+        System.out.printf("Found:  set=%d uniq=%d rw=%d%n",
+                chronicle.getFoundSetCount(), chronicle.getFoundUniqueCount(), chronicle.getFoundRunewordCount());
+
+        // Find Arcanna's Sign in the grail
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getSetGrailEntries();
+        int targetIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if ("Arcanna's Sign".equals(grail.get(i).getItemName())) {
+                targetIdx = i;
+                break;
+            }
+        }
+        assertTrue(targetIdx >= 0, "Arcanna's Sign should be in grail");
+
+        String targetName = grail.get(targetIdx).getItemName();
+        int targetId = grail.get(targetIdx).getRawField6();
+        System.out.println("Marking: " + targetName + " (*ID=" + targetId + ") found=" + grail.get(targetIdx).isFound());
+
+        int origUniq = chronicle.getNumUniqueItems();
+        assertTrue(chronicle.markFound(D2Chronicle.Section.SET, targetIdx),
+                "markFound should succeed by growing set section");
+
+        System.out.printf("After mark: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+
+        // Set +1 (growth), unique unchanged
+        assertEquals(112, chronicle.getNumSetItems(),
+                "Set count should be 112 (grew by 1)");
+        assertEquals(origUniq, chronicle.getNumUniqueItems(),
+                "Unique count should stay the same");
+
+        // Write output
+        File outFile = new File("../savefiles/ModernSharedStashSoftCoreV2_set_growth_test.d2i");
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] outBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original size: " + originalContent.length);
+        System.out.println("Written size:  " + outBytes.length);
+        assertEquals(originalContent.length + 10, outBytes.length,
+                "File should grow by 10 bytes (one new set entry)");
+
+        // Show byte diffs (compare matching region)
+        int diffCount = 0;
+        int compareLen = Math.min(originalContent.length, outBytes.length);
+        for (int i = 0; i < compareLen; i++) {
+            if (originalContent[i] != outBytes[i]) {
+                System.out.printf("  Diff @0x%04X: orig=0x%02X new=0x%02X%n",
+                        i, originalContent[i] & 0xFF, outBytes[i] & 0xFF);
+                diffCount++;
+            }
+        }
+        System.out.println("Total byte diffs: " + diffCount);
+
+        // Verify round-trip
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc);
+        assertEquals(chronicle.getNumSetItems(), rc.getNumSetItems());
+        assertEquals(chronicle.getNumUniqueItems(), rc.getNumUniqueItems());
+
+        // Verify Arcanna's Sign is found
+        boolean arcannaFound = false;
+        for (D2Chronicle.ChronicleEntry e : rc.getSetEntries()) {
+            if (e.isFound() && e.getRawField6() == targetId) {
+                arcannaFound = true;
+                break;
+            }
+        }
+        assertTrue(arcannaFound, "Arcanna's Sign should be found after round-trip");
+
+        System.out.println("\nOutput: " + outFile.getAbsolutePath());
+        System.out.println("Deploy: Copy-Item -Path \"" + outFile.getAbsolutePath()
+                + "\" -Destination \"$env:USERPROFILE\\Saved Games\\Diablo II Resurrected\\ModernSharedStashSoftCoreV2.d2i\" -Force");
+    }
+
+    /**
+     * Uses the D2R-written 9132-byte file (set=112) as the baseline.
+     * Marks Arcanna's Sign as found (set grows 112→113).
+     * Item panes are preserved verbatim (chronicle-only update).
+     * Produces a deployable file for game testing.
+     */
+    @Test
+    public void testChronicleGrowthOnD2RBaseline() throws Exception {
+        File stashFile = new File("../savefiles/ModernSharedStashSoftCoreV2_d2r_grown_112.d2i");
+        if (!stashFile.exists()) {
+            System.out.println("Skipping: " + stashFile.getAbsolutePath() + " not found");
+            return;
+        }
+
+        byte[] originalContent = Files.readAllBytes(stashFile.toPath());
+        D2SharedStash stash = new D2SharedStashReader().readStash(ROW, stashFile.getAbsolutePath(),
+                new D2BitReader(stashFile.getAbsolutePath()));
+        D2Chronicle chronicle = stash.getChronicle();
+        assertNotNull(chronicle);
+
+        System.out.println("=== D2R BASELINE (9132 bytes, set=112) ===");
+        System.out.printf("File size: %d%n", originalContent.length);
+        System.out.printf("Counts: set=%d uniq=%d rw=%d%n",
+                chronicle.getNumSetItems(), chronicle.getNumUniqueItems(), chronicle.getNumRunewords());
+        System.out.printf("Found:  set=%d uniq=%d rw=%d%n",
+                chronicle.getFoundSetCount(), chronicle.getFoundUniqueCount(), chronicle.getFoundRunewordCount());
+
+        assertEquals(112, chronicle.getNumSetItems(), "D2R baseline should have set=112");
+
+        // Find Arcanna's Sign in grail
+        List<D2Chronicle.ChronicleEntry> grail = chronicle.getSetGrailEntries();
+        int targetIdx = -1;
+        for (int i = 0; i < grail.size(); i++) {
+            if ("Arcanna's Sign".equals(grail.get(i).getItemName())) {
+                targetIdx = i;
+                break;
+            }
+        }
+        assertTrue(targetIdx >= 0, "Arcanna's Sign should be in grail");
+        assertFalse(grail.get(targetIdx).isFound(), "Arcanna's Sign should NOT already be found");
+        int targetId = grail.get(targetIdx).getRawField6();
+        System.out.println("Target: " + grail.get(targetIdx).getItemName() + " *ID=" + targetId);
+
+        // Mark found — grows set from 112→113
+        assertTrue(chronicle.markFound(D2Chronicle.Section.SET, targetIdx));
+        assertEquals(113, chronicle.getNumSetItems(), "Set count should grow to 113");
+        assertTrue(chronicle.isModified());
+
+        // Write — chronicle-only update preserves item panes verbatim
+        File outFile = new File("../savefiles/ModernSharedStashSoftCoreV2_d2r_growth_test.d2i");
+        D2SharedStash writableStash = new D2SharedStash(ROW, outFile.getAbsolutePath(),
+                stash.getPanes(), originalContent, chronicle);
+        new D2SharedStashWriter(ROW, outFile, originalContent).write(writableStash);
+        byte[] outBytes = Files.readAllBytes(outFile.toPath());
+
+        System.out.println("Original size: " + originalContent.length);
+        System.out.println("Written size:  " + outBytes.length);
+        assertEquals(originalContent.length + 10, outBytes.length,
+                "File should grow by exactly 10 bytes (one new set entry)");
+
+        // Verify all non-chronicle panes are byte-identical
+        int chroniclePaneOffset = -1;
+        for (int i = 0; i < originalContent.length - 4; i++) {
+            if (originalContent[i] == 0x55 && originalContent[i+1] == (byte)0xAA
+                    && originalContent[i+2] == 0x55 && originalContent[i+3] == (byte)0xAA) {
+                if (i + 67 < originalContent.length
+                        && originalContent[i+64] == (byte)0xC0 && originalContent[i+65] == (byte)0xED
+                        && originalContent[i+66] == (byte)0xEA && originalContent[i+67] == (byte)0xC0) {
+                    chroniclePaneOffset = i;
+                    break;
+                }
+            }
+        }
+        assertTrue(chroniclePaneOffset > 0, "Should find chronicle pane offset");
+        System.out.println("Chronicle pane starts at offset " + chroniclePaneOffset);
+
+        // Everything before chronicle pane should be byte-identical
+        for (int i = 0; i < chroniclePaneOffset; i++) {
+            assertEquals(originalContent[i], outBytes[i],
+                    "Byte mismatch before chronicle at offset " + i);
+        }
+        System.out.println("All " + chroniclePaneOffset + " bytes before chronicle pane are identical — item panes preserved!");
+
+        // Verify round-trip
+        D2SharedStash reloaded = new D2SharedStashReader().readStash(ROW,
+                outFile.getAbsolutePath(), new D2BitReader(outFile.getAbsolutePath()));
+        D2Chronicle rc = reloaded.getChronicle();
+        assertNotNull(rc);
+        assertEquals(113, rc.getNumSetItems());
+        assertEquals(chronicle.getNumUniqueItems(), rc.getNumUniqueItems());
+        assertEquals(chronicle.getNumRunewords(), rc.getNumRunewords());
+
+        // Verify Arcanna's Sign is found
+        boolean arcannaFound = false;
+        for (D2Chronicle.ChronicleEntry e : rc.getSetEntries()) {
+            if (e.isFound() && e.getRawField6() == targetId) {
+                arcannaFound = true;
+                break;
+            }
+        }
+        assertTrue(arcannaFound, "Arcanna's Sign should be found after round-trip");
+
+        System.out.println("\n=== DEPLOY COMMAND ===");
+        System.out.println("Copy-Item -Path '" + outFile.getAbsolutePath()
+                + "' -Destination \"$env:USERPROFILE\\Saved Games\\Diablo II Resurrected\\ModernSharedStashSoftCoreV2.d2i\" -Force");
+    }
+
 }

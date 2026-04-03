@@ -177,14 +177,14 @@ public class D2SharedStashReader {
             }
 
             if (allZero) {
-                entries.add(new ChronicleEntry(false, 0, 0, 0));
+                entries.add(new ChronicleEntry(false, 0, 0, 0, 0, new byte[10]));
             } else {
                 int field0 = (entryBytes[0] & 0xFF) | ((entryBytes[1] & 0xFF) << 8);
                 long timestamp = (entryBytes[2] & 0xFFL) | ((entryBytes[3] & 0xFFL) << 8)
                         | ((entryBytes[4] & 0xFFL) << 16) | ((entryBytes[5] & 0xFFL) << 24);
                 int field6 = (entryBytes[6] & 0xFF) | ((entryBytes[7] & 0xFF) << 8);
                 int field8 = (entryBytes[8] & 0xFF) | ((entryBytes[9] & 0xFF) << 8);
-                entries.add(new ChronicleEntry(true, timestamp, field0, field6, field8));
+                entries.add(new ChronicleEntry(true, timestamp, field0, field6, field8, entryBytes.clone()));
             }
         }
         return entries;

@@ -1,12 +1,18 @@
 package gomule.gui.sharedStash;
 
+import gomule.D2Files;
 import gomule.d2i.D2Chronicle;
+import gomule.translations.Translations;
 import randall.d2files.D2TxtFile;
 import randall.d2files.D2TxtFileItemProperties;
 
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.*;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 class ChroniclePanel extends JPanel {
@@ -18,6 +24,7 @@ class ChroniclePanel extends JPanel {
     private final JRadioButton uniqueBtn = new JRadioButton("Unique");
     private final JRadioButton setBtn = new JRadioButton("Set");
     private final JRadioButton runeWordsBtn = new JRadioButton("Rune Words");
+    private final JTextField filterField = new JTextField();
     private final JButton toggleFoundBtn = new JButton("Mark as Found");
     private ChronicleMode selectedMode = ChronicleMode.RUNEWORDS;
 
@@ -41,11 +48,22 @@ class ChroniclePanel extends JPanel {
         radioRow.add(uniqueBtn);
         radioRow.add(setBtn);
         radioRow.add(runeWordsBtn);
-        add(radioRow, BorderLayout.NORTH);
+
+        JPanel filterRow = new JPanel(new BorderLayout(4, 0));
+        filterRow.add(new JLabel("Filter:"), BorderLayout.WEST);
+        filterRow.add(filterField, BorderLayout.CENTER);
+
+        JPanel topPanel = new JPanel(new BorderLayout(0, 2));
+        topPanel.add(radioRow, BorderLayout.NORTH);
+        topPanel.add(filterRow, BorderLayout.SOUTH);
+        add(topPanel, BorderLayout.NORTH);
 
         JPanel actionRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 12, 2));
         toggleFoundBtn.setEnabled(false);
         actionRow.add(toggleFoundBtn);
+        JButton bulkMarkBtn = new JButton("Bulk Mark...");
+        bulkMarkBtn.addActionListener(e -> showBulkMarkDialog());
+        actionRow.add(bulkMarkBtn);
         add(actionRow, BorderLayout.SOUTH);
 
         // --- Chronicle split panel ---
@@ -77,6 +95,12 @@ class ChroniclePanel extends JPanel {
         entryList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) updateDetail();
         });
+
+        filterField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { rebuildEntryList(); }
+            @Override public void removeUpdate(DocumentEvent e) { rebuildEntryList(); }
+            @Override public void changedUpdate(DocumentEvent e) { rebuildEntryList(); }
+        });
     }
 
     void setChronicle(D2Chronicle chronicle) {
@@ -98,6 +122,7 @@ class ChroniclePanel extends JPanel {
 
     private void switchMode(ChronicleMode mode) {
         selectedMode = mode;
+        filterField.setText("");
         rebuildEntryList();
     }
 
@@ -124,11 +149,21 @@ class ChroniclePanel extends JPanel {
         }
 
         List<D2Chronicle.ChronicleEntry> entries = getSelectedEntries();
-        ChronicleDisplayEntry[] data = new ChronicleDisplayEntry[entries.size()];
+        String filterText = filterField.getText().trim().toLowerCase();
+        List<ChronicleDisplayEntry> filtered = new ArrayList<>();
         for (int i = 0; i < entries.size(); i++) {
             D2Chronicle.ChronicleEntry e = entries.get(i);
-            data[i] = new ChronicleDisplayEntry(e.getItemName(), e.isFound(), i);
+            String name = e.getItemName();
+            String displayName = translateDisplayName(name);
+            if (!filterText.isEmpty() && (displayName == null || !displayName.toLowerCase().contains(filterText))) {
+                continue;
+            }
+            filtered.add(new ChronicleDisplayEntry(displayName, e.isFound(), i));
         }
+        if (selectedMode == ChronicleMode.UNIQUE || selectedMode == ChronicleMode.SET) {
+            filtered.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.name, b.name));
+        }
+        ChronicleDisplayEntry[] data = filtered.toArray(new ChronicleDisplayEntry[0]);
         entryList.setListData(data);
         if (data.length > 0) {
             entryList.setSelectedIndex(0);
@@ -145,7 +180,8 @@ class ChroniclePanel extends JPanel {
             updateToggleFoundButtonState();
             return;
         }
-        D2Chronicle.ChronicleEntry entry = getSelectedEntries().get(idx);
+        int grailIndex = ((ChronicleDisplayEntry) entryList.getModel().getElementAt(idx)).index;
+        D2Chronicle.ChronicleEntry entry = getSelectedEntries().get(grailIndex);
         detailPane.setText(buildDetailHtml(entry));
         detailPane.setCaretPosition(0);
         updateToggleFoundButtonState();
@@ -159,8 +195,19 @@ class ChroniclePanel extends JPanel {
         if (selectedIndex < 0) {
             return;
         }
-        boolean changed = chronicle.toggleFound(toSection(selectedMode), selectedIndex);
+        ChronicleDisplayEntry displayEntry = (ChronicleDisplayEntry) entryList.getModel().getElementAt(selectedIndex);
+        int grailIndex = displayEntry.index;
+        boolean wasFound = displayEntry.found;
+        boolean changed = chronicle.toggleFound(toSection(selectedMode), grailIndex);
         if (!changed) {
+            if (!wasFound) {
+                JOptionPane.showMessageDialog(
+                        SwingUtilities.getWindowAncestor(this),
+                        "Unable to mark this item as found.\n"
+                                + "It may already be marked, or an internal error occurred.",
+                        "Cannot Mark as Found",
+                        JOptionPane.WARNING_MESSAGE);
+            }
             return;
         }
         rebuildEntryList();
@@ -186,13 +233,13 @@ class ChroniclePanel extends JPanel {
 
     private void updateToggleFoundButtonState() {
         int selectedIndex = entryList.getSelectedIndex();
-        if (chronicle == null || selectedIndex < 0 || selectedIndex >= getSelectedEntries().size()) {
+        if (chronicle == null || selectedIndex < 0 || selectedIndex >= entryList.getModel().getSize()) {
             toggleFoundBtn.setEnabled(false);
             toggleFoundBtn.setText("Mark as Found");
             return;
         }
         toggleFoundBtn.setEnabled(true);
-        boolean isFound = getSelectedEntries().get(selectedIndex).isFound();
+        boolean isFound = ((ChronicleDisplayEntry) entryList.getModel().getElementAt(selectedIndex)).found;
         toggleFoundBtn.setText(isFound ? "Mark as Not Found" : "Mark as Found");
     }
 
@@ -216,7 +263,7 @@ class ChroniclePanel extends JPanel {
     }
 
     private String buildGenericChronicleHtml(D2Chronicle.ChronicleEntry entry, String typeName) {
-        String name = entry.getItemName();
+        String name = translateDisplayName(entry.getItemName());
         String foundColor = entry.isFound() ? "#d4af37" : "#888888";
         StringBuilder sb = new StringBuilder("<html><body style='font-family:sans-serif;font-size:11px;padding:4px;'>");
 
@@ -232,13 +279,31 @@ class ChroniclePanel extends JPanel {
         sb.append("</center><hr/>");
 
         sb.append("<b>Name:</b> ").append(esc(name != null ? name : "Unknown")).append("<br/>");
-        sb.append("<b>Chronicle Id:</b> ").append(entry.getRawField6() & 0xFFFF).append("<br/>");
-        if (entry.isFound() && entry.getRawTimestamp() != 0) {
-            sb.append("<b>Found Time:</b> ").append(formatTimestamp(entry.getRawTimestamp())).append("<br/>");
-        }
-        if (entry.isFound() && entry.getRawField0() != 0) {
-            String monsterName = D2Chronicle.getMonsterNameByHcIdx(entry.getRawField0());
-            sb.append("<b>Dropped By:</b> ").append(esc(monsterName != null ? monsterName : "Unknown (ID: " + entry.getRawField0() + ")")).append("<br/>");
+        int itemId = entry.getRawField6() & 0xFFFF;
+        sb.append("<b>Chronicle Id:</b> ").append(itemId).append("<br/>");
+
+        // Show txt file *ID and properties for unique/set items
+        boolean isUnique = "Unique Item".equals(typeName);
+        D2TxtFile txtFile = isUnique ? D2TxtFile.UNIQUES : D2TxtFile.SETITEMS;
+        D2TxtFileItemProperties row = txtFile.searchColumns("*ID", String.valueOf(itemId));
+        if (row != null) {
+            sb.append("<b>").append(isUnique ? "UniqueItems" : "SetItems").append(" *ID:</b> ").append(itemId).append("<br/>");
+
+            // Show properties
+            sb.append("<hr/><b>Properties:</b><br/>");
+            boolean hasProps = false;
+            for (int i = 1; i <= 12; i++) {
+                String code = row.get("prop" + i);
+                if (code == null || code.isEmpty()) continue;
+                String param = row.get("par" + i);
+                String min = row.get("min" + i);
+                String max = row.get("max" + i);
+                sb.append("&nbsp;&bull;&nbsp;").append(esc(formatProp(code, param, min, max))).append("<br/>");
+                hasProps = true;
+            }
+            if (!hasProps) {
+                sb.append("<font color='#888'>none</font><br/>");
+            }
         }
 
         sb.append("</body></html>");
@@ -246,8 +311,9 @@ class ChroniclePanel extends JPanel {
     }
 
     private String buildRunewordHtml(D2Chronicle.ChronicleEntry entry) {
-        String name = entry.getItemName();
-        D2TxtFileItemProperties row = findRunewordRow(name);
+        String rawName = entry.getItemName();
+        String name = translateDisplayName(rawName);
+        D2TxtFileItemProperties row = findRunewordRow(rawName);
         StringBuilder sb = new StringBuilder("<html><body style='font-family:sans-serif;font-size:11px;padding:4px;'>");
 
         // Title + status
@@ -261,10 +327,6 @@ class ChroniclePanel extends JPanel {
             sb.append("<font color='#999999'>\u2717 Not Found</font>");
         }
         sb.append("</center><hr/>");
-
-        if (entry.isFound() && entry.getRawTimestamp() != 0) {
-            sb.append("<b>Found Time:</b> ").append(formatTimestamp(entry.getRawTimestamp())).append("<br/>");
-        }
 
         if (row != null) {
             // Rune recipe
@@ -356,12 +418,167 @@ class ChroniclePanel extends JPanel {
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
-    private static String formatTimestamp(long ts) {
-        if (ts <= 0) return String.valueOf(ts);
-        // Timestamps are minutes since the Unix epoch.
-        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm");
-        return sdf.format(new java.util.Date(ts * 60L * 1000L));
+    private static String translateDisplayName(String name) {
+        if (name == null) return null;
+        try {
+            Translations translations = D2Files.getInstance().getTranslations();
+            String enUS = translations.getTranslationOrNull(name);
+            if (enUS != null && !enUS.equals(name)) {
+                return enUS + " (" + name + ")";
+            }
+        } catch (Exception ignored) {
+        }
+        return name;
     }
+
+    private void showBulkMarkDialog() {
+        if (chronicle == null) return;
+
+        Window owner = SwingUtilities.getWindowAncestor(this);
+        JDialog dialog = new JDialog(owner instanceof Frame ? (Frame) owner : null,
+                "Bulk Mark as Found", true);
+        dialog.setLayout(new BorderLayout(4, 4));
+        dialog.setSize(420, 340);
+        dialog.setLocationRelativeTo(this);
+
+        JTextArea textArea = new JTextArea();
+        textArea.setLineWrap(true);
+        textArea.setWrapStyleWord(true);
+        JScrollPane scroll = new JScrollPane(textArea);
+        scroll.setBorder(BorderFactory.createTitledBorder("Enter enUS item names (one per line)"));
+        dialog.add(scroll, BorderLayout.CENTER);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 4));
+        JButton markBtn = new JButton("Mark all as found");
+        JButton cancelBtn = new JButton("Cancel");
+        btnPanel.add(markBtn);
+        btnPanel.add(cancelBtn);
+        dialog.add(btnPanel, BorderLayout.SOUTH);
+
+        cancelBtn.addActionListener(e -> dialog.dispose());
+        markBtn.addActionListener(e -> {
+            executeBulkMark(textArea.getText(), dialog);
+        });
+
+        dialog.setVisible(true);
+    }
+
+    private void executeBulkMark(String text, JDialog dialog) {
+        if (chronicle == null) return;
+
+        Translations translations;
+        try {
+            translations = D2Files.getInstance().getTranslations();
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(dialog, "Translations not available.", "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        D2Chronicle.Section section = toSection(selectedMode);
+        List<D2Chronicle.ChronicleEntry> grailEntries = getSelectedEntries();
+
+        List<String> ambiguous = new ArrayList<>();
+        List<String> notFound = new ArrayList<>();
+        List<String> marked = new ArrayList<>();
+        List<String> capacityFull = new ArrayList<>();
+
+        String[] lines = text.split("\\r?\\n");
+        for (String line : lines) {
+            String enUS = line.trim();
+            if (enUS.isEmpty()) continue;
+
+            // Reverse lookup: enUS → Key(s)
+            List<String> keys = translations.getKeysForEnUS(enUS);
+
+            // Also check if the input itself is a Key directly
+            if (keys.isEmpty()) {
+                String directCheck = translations.getTranslationOrNull(enUS);
+                if (directCheck != null) {
+                    keys = Collections.singletonList(enUS);
+                }
+            }
+
+            if (keys.isEmpty()) {
+                notFound.add(enUS);
+                continue;
+            }
+
+            // Filter keys to only those present in the current grail section
+            List<Integer> matchingIndices = new ArrayList<>();
+            List<String> matchingKeys = new ArrayList<>();
+            for (String key : keys) {
+                for (int i = 0; i < grailEntries.size(); i++) {
+                    if (key.equals(grailEntries.get(i).getItemName())) {
+                        matchingIndices.add(i);
+                        matchingKeys.add(key);
+                    }
+                }
+            }
+
+            if (matchingIndices.isEmpty()) {
+                notFound.add(enUS);
+                continue;
+            }
+            if (matchingIndices.size() > 1) {
+                ambiguous.add(enUS);
+                continue;
+            }
+
+            int grailIndex = matchingIndices.get(0);
+            if (grailEntries.get(grailIndex).isFound()) {
+                continue;
+            }
+            boolean ok = chronicle.markFound(section, grailIndex);
+            if (ok) {
+                marked.add(enUS);
+            } else {
+                capacityFull.add(enUS);
+            }
+        }
+
+        // Rebuild UI
+        if (!marked.isEmpty()) {
+            rebuildEntryList();
+            if (onChronicleChanged != null) {
+                onChronicleChanged.run();
+            }
+        }
+
+        // Build summary
+        StringBuilder msg = new StringBuilder();
+        if (!marked.isEmpty()) {
+            msg.append("Marked as found (").append(marked.size()).append("):\n");
+            marked.forEach(n -> msg.append("  \u2713 ").append(n).append("\n"));
+        }
+        if (!capacityFull.isEmpty()) {
+            if (msg.length() > 0) msg.append("\n");
+            msg.append("Section full — no slots available (").append(capacityFull.size()).append("):\n");
+            capacityFull.forEach(n -> msg.append("  \u2717 ").append(n).append("\n"));
+        }
+        if (!ambiguous.isEmpty()) {
+            if (msg.length() > 0) msg.append("\n");
+            msg.append("Can't batch process (multiple matches) (").append(ambiguous.size()).append("):\n");
+            ambiguous.forEach(n -> msg.append("  \u2717 ").append(n).append("\n"));
+        }
+        if (!notFound.isEmpty()) {
+            if (msg.length() > 0) msg.append("\n");
+            msg.append("Not found in current section (").append(notFound.size()).append("):\n");
+            notFound.forEach(n -> msg.append("  \u2717 ").append(n).append("\n"));
+        }
+
+        dialog.dispose();
+        if (msg.length() > 0) {
+            JTextArea resultArea = new JTextArea(msg.toString());
+            resultArea.setEditable(false);
+            resultArea.setRows(Math.min(20, msg.toString().split("\n").length + 1));
+            resultArea.setColumns(40);
+            JScrollPane resultScroll = new JScrollPane(resultArea);
+            JOptionPane.showMessageDialog(SwingUtilities.getWindowAncestor(this),
+                    resultScroll, "Bulk Mark Results", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+
+
 
     // ── Inner classes ──────────────────────────────────────────────────────────
 

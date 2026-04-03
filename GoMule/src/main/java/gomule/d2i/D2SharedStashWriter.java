@@ -19,19 +19,6 @@ public class D2SharedStashWriter {
     private final File file;
     private final byte[] originalContent;
 
-    // Pane-0 upgrade bytes used by the native stash format when switching JM version 1 -> 2.
-    // Migration is triggered from actual chronicle growth in this file, not from fixed runeword counts.
-    private static final byte[] PANE0_VERSION_UPGRADE_BLOCK = {
-            0x10, 0x08, (byte) 0x80, 0x04, 0x05, 0x20, 0x54, 0x0F, 0x35, (byte) 0xA2,
-            (byte) 0xCE, (byte) 0xF0, 0x30, (byte) 0xCA, (byte) 0xC0, 0x1D, 0x28, 0x4D,
-            (byte) 0x90, (byte) 0xC9, 0x61, (byte) 0x96, (byte) 0x88, (byte) 0xFE, 0x7F,
-            0x00, (byte) 0x98, 0x15, 0x07, (byte) 0x98, 0x60, 0x18, 0x1B, (byte) 0xC1,
-            0x1F, 0x71, 0x33, (byte) 0xE0, 0x21, (byte) 0xFF, 0x01, 0x10, 0x00, (byte) 0xA0,
-            0x00, 0x35, 0x00, (byte) 0xE0, 0x6C, 0x3F, 0x09, 0x00, 0x10, 0x00, (byte) 0xA0,
-            0x00, 0x35, 0x04, (byte) 0xE0, 0x7C, (byte) 0xEF, 0x13, 0x00, 0x10, 0x00,
-            (byte) 0xA0, 0x00, 0x35, 0x08, (byte) 0xE0, 0x6C, (byte) 0xBF, 0x13, 0x00
-    };
-
     public D2SharedStashWriter(Variant variant, File file, byte[] originalContent) {
         this.variant = variant;
         this.file = file;
@@ -47,22 +34,6 @@ public class D2SharedStashWriter {
         D2BitReader bitReader = new D2BitReader(originalContent.clone());
         int[] stashHeaderOffsets = getStashHeaderOffsets(variant, bitReader);
         
-        // Check if pane 0 needs v1->v2 migration.
-        // Pane 0 has a JM header at offset 64; the version byte at offset 66
-        // is 0x01 for v1 (pre-migration) and 0x02 for v2 (post-migration).
-        // Migration is needed only when chronicle runeword entries actually grow
-        // and pane 0 is still in v1 format.
-        boolean needsMigration = false;
-        if (stash.getChronicle() != null && stash.getChronicle().isModified()) {
-            int originalRunewords = getOriginalRunewordCount(stashHeaderOffsets);
-            int newRunewords = stash.getChronicle().getNumRunewords();
-            boolean pane0IsV1 = originalContent.length > 66
-                    && originalContent[64] == (byte) 0x4A && originalContent[65] == (byte) 0x4D
-                    && originalContent[66] == (byte) 0x01;
-            int runewordDelta = newRunewords - originalRunewords;
-            needsMigration = pane0IsV1 && runewordDelta > 0;
-        }
-        
         List<byte[]> stashPanes = new ArrayList<>();
         boolean chronicleWritten = false;
         
@@ -70,10 +41,7 @@ public class D2SharedStashWriter {
             int paneStart = stashHeaderOffsets[i];
             int paneEnd = i + 1 < stashHeaderOffsets.length ? stashHeaderOffsets[i + 1] : originalContent.length;
             
-            if (i == 0 && needsMigration) {
-                // Apply v1->v2 migration to first pane
-                stashPanes.add(applyMigrationToPane0(paneStart, paneEnd));
-            } else if (i < variant.getSharedStashConfig().getItemStashPaneCount()) {
+            if (i < variant.getSharedStashConfig().getItemStashPaneCount()) {
                 if (stash.getChronicle() != null) {
                     // Chronicle-only updates must not mutate item panes.
                     stashPanes.add(Arrays.copyOfRange(originalContent, paneStart, paneEnd));
@@ -104,123 +72,87 @@ public class D2SharedStashWriter {
                 && originalContent[paneStart + 67] == (byte) 0xC0;
     }
 
-    private int getOriginalRunewordCount(int[] stashHeaderOffsets) {
-        // Find the chronicle pane and extract runeword count
-        for (int i = 0; i < stashHeaderOffsets.length - 1; i++) {
-            int paneStart = stashHeaderOffsets[i];
-            int paneEnd = stashHeaderOffsets[i + 1];
-            if (isChroniclePane(paneStart, paneEnd)) {
-                return (originalContent[paneStart + 74] & 0xFF) | ((originalContent[paneStart + 75] & 0xFF) << 8);
-            }
-        }
-        // Check last pane
-        if (stashHeaderOffsets.length > 0) {
-            int paneStart = stashHeaderOffsets[stashHeaderOffsets.length - 1];
-            int paneEnd = originalContent.length;
-            if (isChroniclePane(paneStart, paneEnd)) {
-                return (originalContent[paneStart + 74] & 0xFF) | ((originalContent[paneStart + 75] & 0xFF) << 8);
-            }
-        }
-        return 0;
-    }
-
-    private byte[] applyMigrationToPane0(int paneStart, int paneEnd) {
-        final int insertionOffset = 96;
-        if (paneEnd - paneStart < insertionOffset) {
-            return Arrays.copyOfRange(originalContent, paneStart, paneEnd);
-        }
-
-        // Copy first 96 bytes
-        byte[] migrated = new byte[paneEnd - paneStart + PANE0_VERSION_UPGRADE_BLOCK.length];
-        System.arraycopy(originalContent, paneStart, migrated, 0, insertionOffset);
-
-        // Update version byte from 1 to 2 (at offset 66)
-        migrated[66] = 0x02;
-
-        // Insert migration block at offset 96
-        System.arraycopy(PANE0_VERSION_UPGRADE_BLOCK, 0, migrated, insertionOffset, PANE0_VERSION_UPGRADE_BLOCK.length);
-
-        // Copy remaining pane data after inserted upgrade bytes.
-        int remainingStart = paneStart + insertionOffset;
-        int remainingLen = paneEnd - remainingStart;
-        int migratedRemainingStart = insertionOffset + PANE0_VERSION_UPGRADE_BLOCK.length;
-        System.arraycopy(originalContent, remainingStart, migrated, migratedRemainingStart, remainingLen);
-
-        // Update the pane length field (bytes 16-19) to new size
-        int newLength = migrated.length;
-        writeInt32LE(migrated, 16, newLength);
-
-        return migrated;
-    }
-
+    /**
+     * Writes a modified chronicle pane by patching the original pane bytes.
+     * Copies the first 88 bytes verbatim (pane header + C0EDEAC0 magic + chronicle header
+     * including version and reserved bytes), then writes all entry raw bytes, appends the
+     * original trailer, and patches only the count fields and pane length.
+     *
+     * Chronicle pane layout (offsets relative to pane start):
+     *   [0..63]   standard pane header  (preserved verbatim)
+     *   [64..67]  C0EDEAC0 magic        (preserved verbatim)
+     *   [68..69]  version               (preserved verbatim)
+     *   [70..71]  numSetItems           (patched)
+     *   [72..73]  numUniqueItems        (patched)
+     *   [74..75]  numRunewords          (patched)
+     *   [76..87]  reserved 12 bytes     (preserved verbatim)
+     *   [88..]    10-byte entries: set, then unique, then runeword
+     *   [..]      trailer bytes         (preserved verbatim)
+     */
     private byte[] writeChroniclePane(D2Chronicle chronicle, int paneStart, int paneEnd) {
-        byte[] payload = buildChroniclePayload(chronicle);
-        byte[] trailer = getOriginalChronicleTrailerBytes(paneStart, paneEnd);
-        int paneLength = 64 + 4 + payload.length + trailer.length;
-        byte[] paneBytes = new byte[paneLength];
+        byte[] origPane = Arrays.copyOfRange(originalContent, paneStart, paneEnd);
 
-        System.arraycopy(originalContent, paneStart, paneBytes, 0, 68);
-        System.arraycopy(payload, 0, paneBytes, 68, payload.length);
-        if (trailer.length > 0) {
-            System.arraycopy(trailer, 0, paneBytes, 68 + payload.length, trailer.length);
-        }
-        writeInt32LE(paneBytes, 16, paneLength);
-        return paneBytes;
+        // Compute original entry area bounds
+        int origNumSet = readU16LE(origPane, 70);
+        int origNumUniq = readU16LE(origPane, 72);
+        int origNumRW = readU16LE(origPane, 74);
+        int origEntryBytes = (origNumSet + origNumUniq + origNumRW) * 10;
+        int entryAreaStart = 88;
+        int origTrailerStart = entryAreaStart + origEntryBytes;
+        byte[] trailer = Arrays.copyOfRange(origPane, origTrailerStart, origPane.length);
+
+        // Build new entry area — just raw bytes one after another
+        ByteArrayOutputStream entryBuf = new ByteArrayOutputStream();
+        writeEntryRawBytes(entryBuf, chronicle.getSetEntries(), chronicle.getNumSetItems());
+        writeEntryRawBytes(entryBuf, chronicle.getUniqueEntries(), chronicle.getNumUniqueItems());
+        writeEntryRawBytes(entryBuf, chronicle.getRunewordEntries(), chronicle.getNumRunewords());
+        byte[] newEntryArea = entryBuf.toByteArray();
+
+        // Assemble: original header (88 bytes) + new entries + original trailer
+        int newPaneLength = entryAreaStart + newEntryArea.length + trailer.length;
+        byte[] newPane = new byte[newPaneLength];
+        System.arraycopy(origPane, 0, newPane, 0, entryAreaStart);
+        System.arraycopy(newEntryArea, 0, newPane, entryAreaStart, newEntryArea.length);
+        System.arraycopy(trailer, 0, newPane, entryAreaStart + newEntryArea.length, trailer.length);
+
+        // Patch the three count fields
+        writeU16LE(newPane, 70, chronicle.getNumSetItems());
+        writeU16LE(newPane, 72, chronicle.getNumUniqueItems());
+        writeU16LE(newPane, 74, chronicle.getNumRunewords());
+
+        // Patch pane length (bytes 16..19)
+        writeInt32LE(newPane, 16, newPaneLength);
+
+        return newPane;
     }
 
-    private byte[] getOriginalChronicleTrailerBytes(int paneStart, int paneEnd) {
-        int minChroniclePayloadStart = paneStart + 68;
-        int entryDataStart = paneStart + 88;
-        if (paneEnd <= entryDataStart || originalContent.length < minChroniclePayloadStart + 8) {
-            return new byte[0];
-        }
-
-        int originalNumSetItems = readU16LEFromOriginal(paneStart + 70);
-        int originalNumUniqueItems = readU16LEFromOriginal(paneStart + 72);
-        int originalNumRunewords = readU16LEFromOriginal(paneStart + 74);
-        int originalEntryBytes = (originalNumSetItems + originalNumUniqueItems + originalNumRunewords) * 10;
-        int trailerStart = entryDataStart + originalEntryBytes;
-        if (trailerStart < entryDataStart || trailerStart > paneEnd) {
-            return new byte[0];
-        }
-        return Arrays.copyOfRange(originalContent, trailerStart, paneEnd);
-    }
-
-    private int readU16LEFromOriginal(int offset) {
-        return (originalContent[offset] & 0xFF) | ((originalContent[offset + 1] & 0xFF) << 8);
-    }
-
-    private byte[] buildChroniclePayload(D2Chronicle chronicle) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        writeU16LE(out, chronicle.getVersion());
-        writeU16LE(out, chronicle.getNumSetItems());
-        writeU16LE(out, chronicle.getNumUniqueItems());
-        writeU16LE(out, chronicle.getNumRunewords());
-
-        for (int i = 0; i < 12; i++) {
-            out.write(0);
-        }
-
-        writeChronicleEntries(out, chronicle.getSetEntries(), chronicle.getNumSetItems());
-        writeChronicleEntries(out, chronicle.getUniqueEntries(), chronicle.getNumUniqueItems());
-        writeChronicleEntries(out, chronicle.getRunewordEntries(), chronicle.getNumRunewords());
-        return out.toByteArray();
-    }
-
-    private void writeChronicleEntries(ByteArrayOutputStream out, List<D2Chronicle.ChronicleEntry> entries, int count) {
+    private void writeEntryRawBytes(ByteArrayOutputStream out, List<D2Chronicle.ChronicleEntry> entries, int count) {
         for (int i = 0; i < count; i++) {
             D2Chronicle.ChronicleEntry entry = i < entries.size() ? entries.get(i) : null;
             if (entry == null || !entry.isFound()) {
-                for (int j = 0; j < 10; j++) {
-                    out.write(0);
-                }
+                out.write(new byte[10], 0, 10);
                 continue;
             }
-            writeU16LE(out, entry.getRawField0());
-            writeU32LE(out, entry.getRawTimestamp());
-            writeU16LE(out, entry.getRawField6());
-            writeU16LE(out, entry.getRawField8());
+            byte[] raw = entry.getRawBytes();
+            if (raw != null && raw.length == 10) {
+                out.write(raw, 0, 10);
+            } else {
+                // Fabricated entry — build raw bytes from decoded fields
+                writeU16LE(out, entry.getRawField0());
+                writeU32LE(out, entry.getRawTimestamp());
+                writeU16LE(out, entry.getRawField6());
+                writeU16LE(out, entry.getRawField8());
+            }
         }
+    }
+
+    private int readU16LE(byte[] buf, int offset) {
+        return (buf[offset] & 0xFF) | ((buf[offset + 1] & 0xFF) << 8);
+    }
+
+    private void writeU16LE(byte[] buf, int offset, int value) {
+        buf[offset] = (byte) (value & 0xFF);
+        buf[offset + 1] = (byte) ((value >>> 8) & 0xFF);
     }
 
     private void writeU16LE(ByteArrayOutputStream out, int value) {
