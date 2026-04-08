@@ -42,10 +42,16 @@ public class D2Chronicle {
     private final List<ChronicleEntry> setEntries;
     private final List<ChronicleEntry> uniqueEntries;
     private final List<ChronicleEntry> runewordEntries;
+    /**
+     * True for newer D2R game files (RoW patch) where the item *ID is stored in
+     * field0 (bytes 0-1 of each 10-byte entry) rather than field6 (bytes 6-7).
+     * These files also use 8-byte padding before entries instead of 12 bytes.
+     */
+    private final boolean newEntryFormat;
 
     public D2Chronicle(int version, int numSetItems, int numUniqueItems, int numRunewords,
                         List<ChronicleEntry> setEntries, List<ChronicleEntry> uniqueEntries,
-                        List<ChronicleEntry> runewordEntries) {
+                        List<ChronicleEntry> runewordEntries, boolean newEntryFormat) {
         this.version = version;
         this.numSetItems = numSetItems;
         this.numUniqueItems = numUniqueItems;
@@ -54,9 +60,24 @@ public class D2Chronicle {
         this.setEntries = setEntries;
         this.uniqueEntries = uniqueEntries;
         this.runewordEntries = runewordEntries;
+        this.newEntryFormat = newEntryFormat;
     }
 
     public int getVersion() { return version; }
+    /** Returns true if this chronicle uses the newer entry format (field0=*ID, 8-byte padding). */
+    public boolean isNewEntryFormat() { return newEntryFormat; }
+    /**
+     * Returns the byte offset of the entry area relative to the chronicle pane start.
+     * 88 for old format (12-byte padding), 84 for new format (8-byte padding).
+     */
+    public int getEntryAreaStart() { return newEntryFormat ? 84 : 88; }
+    /**
+     * Returns the *ID of a set/unique chronicle entry.
+     * New format stores *ID in field0 (bytes 0-1); old format stores it in field6 (bytes 6-7).
+     */
+    private int getEntryId(ChronicleEntry entry) {
+        return newEntryFormat ? entry.getRawField0() : entry.getRawField6();
+    }
     public int getNumSetItems() { return numSetItems; }
     public int getNumUniqueItems() { return numUniqueItems; }
     public int getNumRunewords() { return numRunewords; }
@@ -222,7 +243,7 @@ public class D2Chronicle {
         Map<Integer, ChronicleEntry> foundById = new HashMap<>();
         for (ChronicleEntry slot : binarySlots) {
             if (slot.isFound()) {
-                foundById.put(slot.getRawField6(), slot);
+                foundById.put(getEntryId(slot), slot);
             }
         }
 
@@ -441,14 +462,13 @@ public class D2Chronicle {
         }
 
         // Field6 = standard base + row index (produces 0x50xx values).
-        // Field0 bytes[0-1] is always 0x0000 in real game files.
-        // Timestamp bytes[2-5] must be non-zero for the game to recognise the entry as found.
+        // Field0 bytes[0-1] is always 0x0000 in real game runeword entries.
         int newField6 = RUNEWORD_FIELD6_STANDARD_BASE + rowIndex;
-        int newField0 = 0;
-        long timestamp = currentTimestamp();
-        int newField8 = 0;
 
-        ChronicleEntry newEntry = new ChronicleEntry(true, timestamp, newField0, newField6, newField8);
+        // Use a donor entry from any section to preserve game metadata
+        // (bytes 2-3 must be 0x0000, field8 must match game constant).
+        ChronicleEntry donor = findAnyDonorEntry();
+        ChronicleEntry newEntry = fabricateEntry(0, newField6, donor);
         newEntry.setItemName(grailEntry.getItemName());
 
         // The game keeps a sentinel entry (field6=0x0000) at the end of the
@@ -500,20 +520,22 @@ public class D2Chronicle {
 
         // Already found — nothing to do.
         for (ChronicleEntry entry : binaryEntries) {
-            if (entry.isFound() && entry.getRawField6() == astxId) {
+            if (entry.isFound() && getEntryId(entry) == astxId) {
                 return false;
             }
         }
 
         // D2R appears to reject files where a sentinel entry in one section
-        // shares its field6 with an entry in another section.  If the new
-        // item's *ID collides with the OTHER section's sentinel, relocate
-        // that sentinel before inserting the new entry.
-        List<ChronicleEntry> otherEntries = unique ? setEntries : uniqueEntries;
-        relocateSentinelIfCollides(otherEntries, !unique, astxId);
+        // shares its field6 with an entry in another section.  Only applies
+        // to old-format files that have sentinels.
+        if (!newEntryFormat) {
+            List<ChronicleEntry> otherEntries = unique ? setEntries : uniqueEntries;
+            relocateSentinelIfCollides(otherEntries, !unique, astxId);
+        }
 
         // Find any found entry with rawBytes we can use as a donor.
-        // withField6() patches only bytes 6-7, preserving all other game data.
+        // withField0/withField6 patches only the *ID bytes, preserving all
+        // other game data.
         // Prefer a non-first entry so the replacement's bytes[0-5] differ from
         // entry[0]; this prevents findSentinelIndex from mistaking the newly
         // written entry for a sentinel on the next mark operation.
@@ -539,14 +561,22 @@ public class D2Chronicle {
             }
         }
 
-        // If we have a donor, patch field6 to produce a valid entry.
-        // Otherwise fall back to fabricating one (best effort — may not
-        // round-trip perfectly, but at least populates the slot).
+        // If we have a donor, patch the *ID field to produce a valid entry.
+        // Otherwise fall back to fabricating one with correct binary layout.
         ChronicleEntry foundEntry;
         if (donor != null) {
-            foundEntry = donor.withField6(astxId);
+            foundEntry = newEntryFormat ? donor.withField0(astxId) : donor.withField6(astxId);
         } else {
-            foundEntry = new ChronicleEntry(true, currentTimestamp(), borrowField0(binaryEntries), astxId);
+            foundEntry = null;
+        }
+        if (foundEntry == null) {
+            // No same-section donor; try cross-section donor for correct game metadata.
+            ChronicleEntry anyDonor = findAnyDonorEntry();
+            if (newEntryFormat) {
+                foundEntry = fabricateEntry(astxId, 0, anyDonor);
+            } else {
+                foundEntry = fabricateEntry(borrowField0(binaryEntries), astxId, anyDonor);
+            }
         }
         foundEntry.setItemName(grailEntry.getItemName());
 
@@ -559,41 +589,15 @@ public class D2Chronicle {
             }
         }
 
-        // No empty slots.  Replace the sentinel entry with the new item.
+        // No empty slots.  Insert before the sentinel to preserve it.
+        // D2R uses field6=0 (and non-eligible field6 values) as end-of-list
+        // markers.  Overwriting the sentinel causes the game to reject the
+        // file.  Instead, grow the section by inserting the new entry just
+        // before the sentinel.
         if (sentinelIndex >= 0) {
-            binaryEntries.set(sentinelIndex, foundEntry);
-            return true;
-        }
-
-        // No sentinel and no empty slots in this section.
-        // Grow the section by appending.  D2R itself grows set/unique
-        // sections as the player discovers items, so this is safe.
-        //
-        // Unique section: D2R keeps a non-eligible sentinel as the LAST
-        // entry (like runewords keep field6=0x0000 at the end).  New
-        // entries must go BEFORE that sentinel.
-        // Set section: no sentinel — just append at the end.
-        if (unique) {
-            // Find the sentinel at the end and insert before it.
-            int sentinelAtEnd = -1;
-            for (int i = binaryEntries.size() - 1; i >= 0; i--) {
-                ChronicleEntry entry = binaryEntries.get(i);
-                if (entry.isFound()) {
-                    // Re-check if this specific entry is a sentinel
-                    // (non-eligible field6).  The earlier findSentinelIndex
-                    // might have returned -1 because it was used as
-                    // sentinelIndex above.
-                    sentinelAtEnd = i;
-                    break;
-                }
-            }
-            if (sentinelAtEnd >= 0) {
-                binaryEntries.add(sentinelAtEnd, foundEntry);
-            } else {
-                binaryEntries.add(foundEntry);
-            }
+            binaryEntries.add(sentinelIndex, foundEntry);
         } else {
-            // Set section: no sentinel — simply append.
+            // No sentinel and no empty slots — just append.
             binaryEntries.add(foundEntry);
         }
         if (unique) {
@@ -615,8 +619,13 @@ public class D2Chronicle {
      *
      * @return the index of the sentinel, or -1 if none found.
      */
-    private static int findSentinelIndex(List<ChronicleEntry> binaryEntries, boolean unique) {
+    private int findSentinelIndex(List<ChronicleEntry> binaryEntries, boolean unique) {
         if (binaryEntries.isEmpty()) return -1;
+        // New-format files have no sentinel entries in any section.
+        // In new format, field6 holds opaque game data (not the *ID), so
+        // the eligibility check below would incorrectly mark every entry as a
+        // sentinel.  Return -1 to disable sentinel logic entirely.
+        if (newEntryFormat) return -1;
         // Build a set of ELIGIBLE *IDs — only spawnable, chronicle-enabled items.
         D2TxtFile txtFile = unique ? D2TxtFile.UNIQUES : D2TxtFile.SETITEMS;
         String codeCol = unique ? "code" : "item";
@@ -635,9 +644,14 @@ public class D2Chronicle {
             }
         }
         // Scan from the end — the sentinel is typically at or near the end.
+        // f6=0 is treated as a sentinel regardless of eligibility: D2R uses
+        // field6=0 as the end-of-list marker for set/unique sections, even
+        // though *ID=0 (Civerb's Ward) is technically a spawnable set item.
+        // Appending after a f6=0 entry causes D2R to stop reading and reject
+        // the file due to entry-count mismatch.
         for (int i = binaryEntries.size() - 1; i >= 0; i--) {
             ChronicleEntry entry = binaryEntries.get(i);
-            if (entry.isFound() && !eligibleIds.contains(entry.getRawField6())) {
+            if (entry.isFound() && (entry.getRawField6() == 0 || !eligibleIds.contains(entry.getRawField6()))) {
                 return i;
             }
         }
@@ -655,8 +669,14 @@ public class D2Chronicle {
         int astxId = grailEntries.get(grailIndex).getRawField6();
         for (int i = 0; i < binaryEntries.size(); i++) {
             ChronicleEntry entry = binaryEntries.get(i);
-            if (entry.isFound() && entry.getRawField6() == astxId) {
-                binaryEntries.set(i, new ChronicleEntry(false, 0, 0, 0, 0, new byte[10]));
+            if (entry.isFound() && getEntryId(entry) == astxId) {
+                if (newEntryFormat) {
+                    // New format: remove the entry (count = number of found entries)
+                    binaryEntries.remove(i);
+                } else {
+                    // Old format: zero out the slot (pre-allocated empty slot)
+                    binaryEntries.set(i, new ChronicleEntry(false, 0, 0, 0, 0, new byte[10]));
+                }
                 if (unique) {
                     numUniqueItems = binaryEntries.size();
                 } else {
@@ -683,14 +703,65 @@ public class D2Chronicle {
     }
 
     /**
-     * Returns the current time as a chronicle-compatible timestamp.
-     * Note: the actual encoding of this field is unknown — it may not
-     * represent minutes-since-epoch. We still write a plausible value
-     * here for fabricated entries so the game sees a non-zero value
-     * (which it uses to distinguish found from not-found).
+     * Finds any found entry with rawBytes across all chronicle sections.
+     * Used as a donor for fabricating new entries with correct game metadata
+     * (bytes 2-3 = 0, field8 = game constant, etc.).
      */
-    private static long currentTimestamp() {
-        return System.currentTimeMillis() / 60000L;
+    private ChronicleEntry findAnyDonorEntry() {
+        for (List<ChronicleEntry> section : new List[]{setEntries, uniqueEntries, runewordEntries}) {
+            for (ChronicleEntry entry : section) {
+                if (entry.isFound() && entry.getRawBytes() != null) {
+                    return entry;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Fabricates a chronicle entry with the correct 5×u16LE binary layout.
+     * <p>
+     * Each 10-byte entry consists of five u16LE fields:
+     * <pre>
+     *   bytes 0-1: field0 (*ID for set/unique in new format, 0 for runewords)
+     *   bytes 2-3: field2 (always 0x0000 in game-written entries)
+     *   bytes 4-5: field4 (game-internal value, non-zero for found entries)
+     *   bytes 6-7: field6 (game metadata for set/unique, runeword encoding for RW)
+     *   bytes 8-9: field8 (game-internal constant, 0x01C3 observed in all entries)
+     * </pre>
+     * If a donor entry is available, its bytes 2-5 and 8-9 are copied to
+     * preserve game metadata.  Otherwise a best-effort fabrication is used.
+     */
+    private ChronicleEntry fabricateEntry(int field0, int field6, ChronicleEntry donor) {
+        byte[] raw = new byte[10];
+        // field0 (bytes 0-1)
+        raw[0] = (byte) (field0 & 0xFF);
+        raw[1] = (byte) ((field0 >>> 8) & 0xFF);
+        if (donor != null && donor.getRawBytes() != null) {
+            byte[] donorRaw = donor.getRawBytes();
+            // Copy bytes 2-5 (field2 + field4) and 8-9 (field8) from donor
+            System.arraycopy(donorRaw, 2, raw, 2, 4);
+            raw[8] = donorRaw[8];
+            raw[9] = donorRaw[9];
+        } else {
+            // bytes 2-3 must be zero; bytes 4-5 need a non-zero value
+            // Use a simple counter derived from current time
+            int field4 = (int) ((System.currentTimeMillis() / 1000L) & 0xFFFF);
+            if (field4 == 0) field4 = 1;
+            raw[4] = (byte) (field4 & 0xFF);
+            raw[5] = (byte) ((field4 >>> 8) & 0xFF);
+            // field8 = 0x01C3 (observed constant in all game entries)
+            raw[8] = (byte) 0xC3;
+            raw[9] = (byte) 0x01;
+        }
+        // field6 (bytes 6-7)
+        raw[6] = (byte) (field6 & 0xFF);
+        raw[7] = (byte) ((field6 >>> 8) & 0xFF);
+
+        long ts = (raw[2] & 0xFFL) | ((raw[3] & 0xFFL) << 8)
+                | ((raw[4] & 0xFFL) << 16) | ((raw[5] & 0xFFL) << 24);
+        int f8 = (raw[8] & 0xFF) | ((raw[9] & 0xFF) << 8);
+        return new ChronicleEntry(true, ts, field0, field6, f8, raw);
     }
 
     /**
@@ -799,6 +870,24 @@ public class D2Chronicle {
                     | ((patched[4] & 0xFFL) << 16) | ((patched[5] & 0xFFL) << 24);
             int f8 = (patched[8] & 0xFF) | ((patched[9] & 0xFF) << 8);
             return new ChronicleEntry(true, ts, f0, newField6, f8, patched);
+        }
+
+        /**
+         * Creates a new entry by patching the field0 (*ID) in this entry's
+         * raw bytes.  Used for new-format files where *ID is stored in bytes 0-1.
+         * Preserves all other game-written data (bytes 2-9).
+         * Returns null if this entry has no raw bytes.
+         */
+        public ChronicleEntry withField0(int newField0) {
+            if (rawBytes == null) return null;
+            byte[] patched = rawBytes.clone();
+            patched[0] = (byte) (newField0 & 0xFF);
+            patched[1] = (byte) ((newField0 >>> 8) & 0xFF);
+            long ts = (patched[2] & 0xFFL) | ((patched[3] & 0xFFL) << 8)
+                    | ((patched[4] & 0xFFL) << 16) | ((patched[5] & 0xFFL) << 24);
+            int f6 = (patched[6] & 0xFF) | ((patched[7] & 0xFF) << 8);
+            int f8 = (patched[8] & 0xFF) | ((patched[9] & 0xFF) << 8);
+            return new ChronicleEntry(true, ts, newField0, f6, f8, patched);
         }
     }
 }

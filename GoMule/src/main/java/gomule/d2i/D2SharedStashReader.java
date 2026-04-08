@@ -130,26 +130,46 @@ public class D2SharedStashReader {
             int numUniqueItems = readU16LE(bitReader);
             int numRunewords = readU16LE(bitReader);
 
-            // Skip 12 bytes of reserved/padding
-            bitReader.skipBytes(12);
+            // Detect entry format by peeking at bytes at pane offset +84
+            // (i.e. after the 8-byte minimum padding zone at [76..83]).
+            // New-format files (RoW patch): 8-byte padding, *ID in field0 (bytes 0-1).
+            // Old-format files: 12-byte padding, *ID in field6 (bytes 6-7).
+            // In old format, bytes [84..87] are always zero (part of 12-byte padding).
+            // In new format, bytes [84..87] are either the first entry or the start
+            // of the trailer — both typically non-zero.
+            // This check works even when totalEntries == 0: an empty new-format file
+            // has trailer data at offset 84, while an empty old-format file has
+            // zero-padding at offset 84.
+            int afterCountsPos = bitReader.get_byte_pos();
+            boolean newEntryFormat = false;
+            bitReader.set_byte_pos(afterCountsPos + 8);
+            byte[] peek = bitReader.get_bytes(4);
+            if (peek[0] != 0 || peek[1] != 0 || peek[2] != 0 || peek[3] != 0) {
+                newEntryFormat = true;
+            }
+            bitReader.set_byte_pos(afterCountsPos);
+
+            // Skip padding: 8 bytes for new format, 12 for old
+            bitReader.skipBytes(newEntryFormat ? 8 : 12);
 
             // Read set item entries
             List<ChronicleEntry> setEntries = readChronicleEntries(bitReader, numSetItems);
             List<ChronicleEntry> uniqueEntries = readChronicleEntries(bitReader, numUniqueItems);
             List<ChronicleEntry> runewordEntries = readChronicleEntries(bitReader, numRunewords);
 
-            // Set/unique entries use field6 = *ID of the found item.
-            // Assign names by looking up the *ID value in the respective txt file.
+            // Set/unique entries: *ID is in field0 for new format, field6 for old.
             for (ChronicleEntry entry : setEntries) {
                 if (entry.isFound()) {
-                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.SETITEMS, entry.getRawField6());
-                    entry.setItemName(name != null ? name : "SetItem#" + entry.getRawField6());
+                    int idForLookup = newEntryFormat ? entry.getRawField0() : entry.getRawField6();
+                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.SETITEMS, idForLookup);
+                    entry.setItemName(name != null ? name : "SetItem#" + idForLookup);
                 }
             }
             for (ChronicleEntry entry : uniqueEntries) {
                 if (entry.isFound()) {
-                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.UNIQUES, entry.getRawField6());
-                    entry.setItemName(name != null ? name : "UniqueItem#" + entry.getRawField6());
+                    int idForLookup = newEntryFormat ? entry.getRawField0() : entry.getRawField6();
+                    String name = D2Chronicle.getItemNameByAstrixId(D2TxtFile.UNIQUES, idForLookup);
+                    entry.setItemName(name != null ? name : "UniqueItem#" + idForLookup);
                 }
             }
             // Runewords: field6 low byte is offset-encoded in modern RoW files.
@@ -158,7 +178,7 @@ public class D2SharedStashReader {
             }
 
             return new D2Chronicle(version, numSetItems, numUniqueItems, numRunewords,
-                    setEntries, uniqueEntries, runewordEntries);
+                    setEntries, uniqueEntries, runewordEntries, newEntryFormat);
         } catch (Exception e) {
             return null;
         }

@@ -1,2 +1,0 @@
-Copy-Item -Path "C:\Users\yatyr\Saved Games\Diablo II Resurrected\ModernSharedStashSoftCoreV2.d2i.bak" -Destination "C:\Users\yatyr\Saved Games\Diablo II Resurrected\ModernSharedStashSoftCoreV2.d2i" -Force
-Copy-Item -Path "C:\Users\yatyr\Saved Games\Diablo II Resurrected\ModernSharedStashSoftCoreV2.d2i.bak" -Destination "C:\Users\yatyr\workspace\gomule-git\savefiles\ModernSharedStashSoftCoreV2.d2i" -Force

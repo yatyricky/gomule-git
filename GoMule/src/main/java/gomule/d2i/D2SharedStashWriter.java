@@ -74,7 +74,7 @@ public class D2SharedStashWriter {
 
     /**
      * Writes a modified chronicle pane by patching the original pane bytes.
-     * Copies the first 88 bytes verbatim (pane header + C0EDEAC0 magic + chronicle header
+     * Copies the first N bytes verbatim (pane header + C0EDEAC0 magic + chronicle header
      * including version and reserved bytes), then writes all entry raw bytes, appends the
      * original trailer, and patches only the count fields and pane length.
      *
@@ -85,21 +85,23 @@ public class D2SharedStashWriter {
      *   [70..71]  numSetItems           (patched)
      *   [72..73]  numUniqueItems        (patched)
      *   [74..75]  numRunewords          (patched)
-     *   [76..87]  reserved 12 bytes     (preserved verbatim)
-     *   [88..]    10-byte entries: set, then unique, then runeword
+     *   [76..83]  reserved 8 bytes (new format) or [76..87] 12 bytes (old format)
+     *   [84..]    entries (new format) or [88..] entries (old format)
      *   [..]      trailer bytes         (preserved verbatim)
+     *
+     * Both new-format and old-format files use the same layout: the trailer
+     * follows immediately after the last entry with no fixed-size pool region.
+     * The pane grows or shrinks by exactly 10 bytes per entry added or removed.
      */
     private byte[] writeChroniclePane(D2Chronicle chronicle, int paneStart, int paneEnd) {
         byte[] origPane = Arrays.copyOfRange(originalContent, paneStart, paneEnd);
 
-        // Compute original entry area bounds
+        // Compute original entry area bounds using the format reported by the chronicle.
         int origNumSet = readU16LE(origPane, 70);
         int origNumUniq = readU16LE(origPane, 72);
         int origNumRW = readU16LE(origPane, 74);
         int origEntryBytes = (origNumSet + origNumUniq + origNumRW) * 10;
-        int entryAreaStart = 88;
-        int origTrailerStart = entryAreaStart + origEntryBytes;
-        byte[] trailer = Arrays.copyOfRange(origPane, origTrailerStart, origPane.length);
+        int entryAreaStart = chronicle.getEntryAreaStart();
 
         // Build new entry area — just raw bytes one after another
         ByteArrayOutputStream entryBuf = new ByteArrayOutputStream();
@@ -108,7 +110,11 @@ public class D2SharedStashWriter {
         writeEntryRawBytes(entryBuf, chronicle.getRunewordEntries(), chronicle.getNumRunewords());
         byte[] newEntryArea = entryBuf.toByteArray();
 
-        // Assemble: original header (88 bytes) + new entries + original trailer
+        // Trailer starts immediately after the original entries (no pool padding).
+        int origTrailerStart = entryAreaStart + origEntryBytes;
+        byte[] trailer = Arrays.copyOfRange(origPane, origTrailerStart, origPane.length);
+
+        // Assemble: original header + new entries + original trailer
         int newPaneLength = entryAreaStart + newEntryArea.length + trailer.length;
         byte[] newPane = new byte[newPaneLength];
         System.arraycopy(origPane, 0, newPane, 0, entryAreaStart);
